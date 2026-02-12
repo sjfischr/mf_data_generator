@@ -17,6 +17,7 @@ class ApiStack(Stack):
         input_validator: _lambda.IFunction,
         status_checker: _lambda.IFunction,
         download_handler: _lambda.IFunction,
+        lucky_generator: _lambda.IFunction,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -72,6 +73,14 @@ class ApiStack(Stack):
         )
         generate_resource.add_method("POST", generate_integration)
 
+        # POST /api/lucky -> lucky_generator Lambda
+        lucky_resource = api_resource.add_resource("lucky")
+        lucky_integration = apigw.LambdaIntegration(
+            lucky_generator,
+            proxy=True,
+        )
+        lucky_resource.add_method("POST", lucky_integration)
+
         # GET /api/status/{job_id} -> status_checker Lambda
         status_resource = api_resource.add_resource("status")
         status_job_resource = status_resource.add_resource("{job_id}")
@@ -103,6 +112,13 @@ class ApiStack(Stack):
             "GenerateEndpoint",
             value=f"{self.api.url}api/generate",
             description="POST endpoint to generate a new appraisal",
+        )
+
+        CfnOutput(
+            self,
+            "LuckyEndpoint",
+            value=f"{self.api.url}api/lucky",
+            description="POST endpoint to generate lucky starter property input",
         )
 
         CfnOutput(

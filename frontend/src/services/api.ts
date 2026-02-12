@@ -13,6 +13,10 @@ export interface GenerateRequest {
   property_type: 'garden-style' | 'mid-rise' | 'high-rise';
 }
 
+export interface LuckyPropertyResponse extends GenerateRequest {
+  property_name?: string;
+}
+
 export interface GenerateResponse {
   job_id: string;
   status: string;
@@ -105,6 +109,16 @@ export async function generateAppraisal(
   return request<GenerateResponse>('/generate', {
     method: 'POST',
     body: JSON.stringify(data),
+  });
+}
+
+/**
+ * Generate believable starter property data (Haiku-backed).
+ */
+export async function getLuckyProperty(): Promise<LuckyPropertyResponse> {
+  return request<LuckyPropertyResponse>('/lucky', {
+    method: 'POST',
+    body: JSON.stringify({}),
   });
 }
 

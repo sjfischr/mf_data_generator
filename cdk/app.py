@@ -43,6 +43,7 @@ api_stack = ApiStack(
     input_validator=lambda_stack.input_validator,
     status_checker=lambda_stack.status_checker,
     download_handler=lambda_stack.download_handler,
+    lucky_generator=lambda_stack.lucky_generator,
 )
 api_stack.add_dependency(lambda_stack)
 

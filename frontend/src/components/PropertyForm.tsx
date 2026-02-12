@@ -70,6 +70,7 @@ const PROPERTY_TYPES = [
 
 interface Props {
   onSubmit: (data: GenerateRequest) => Promise<void>;
+  onLucky: () => Promise<void>;
 }
 
 interface FormData {
@@ -140,10 +141,11 @@ function validate(form: FormData): FormErrors {
 // Component
 // ---------------------------------------------------------------------------
 
-export default function PropertyForm({ onSubmit }: Props) {
+export default function PropertyForm({ onSubmit, onLucky }: Props) {
   const [form, setForm] = useState<FormData>(INITIAL_FORM);
   const [errors, setErrors] = useState<FormErrors>({});
   const [submitting, setSubmitting] = useState(false);
+  const [luckySubmitting, setLuckySubmitting] = useState(false);
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
@@ -191,6 +193,15 @@ export default function PropertyForm({ onSubmit }: Props) {
   const inputClass = (field: keyof FormData) =>
     `input-field ${errors[field] ? 'input-error' : ''}`;
 
+  const handleLucky = useCallback(async () => {
+    setLuckySubmitting(true);
+    try {
+      await onLucky();
+    } finally {
+      setLuckySubmitting(false);
+    }
+  }, [onLucky]);
+
   return (
     <div className="mx-auto max-w-2xl">
       {/* Intro */}
@@ -199,8 +210,8 @@ export default function PropertyForm({ onSubmit }: Props) {
           Property Details
         </h2>
         <p className="mt-2 text-sm text-slate-500">
-          Enter the multifamily property information below to generate a
-          synthetic appraisal package.
+          Enter multifamily details manually or use I&apos;m Feeling Lucky to
+          auto-generate believable starter inputs with Haiku.
         </p>
       </div>
 
@@ -342,10 +353,25 @@ export default function PropertyForm({ onSubmit }: Props) {
         <hr className="border-slate-200" />
 
         {/* Submit */}
-        <div className="flex items-center justify-end">
+        <div className="flex items-center justify-end gap-3">
+          <button
+            type="button"
+            disabled={submitting || luckySubmitting}
+            onClick={handleLucky}
+            className="btn-secondary min-w-[180px]"
+          >
+            {luckySubmitting ? (
+              <>
+                <Spinner />
+                Summoning Smaug...
+              </>
+            ) : (
+              <>I&apos;m Feeling Lucky</>
+            )}
+          </button>
           <button
             type="submit"
-            disabled={submitting}
+            disabled={submitting || luckySubmitting}
             className="btn-primary min-w-[180px]"
           >
             {submitting ? (

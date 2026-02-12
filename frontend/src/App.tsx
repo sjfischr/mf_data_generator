@@ -3,7 +3,7 @@ import PropertyForm from '@/components/PropertyForm';
 import GenerationProgress from '@/components/GenerationProgress';
 import DownloadLinks from '@/components/DownloadLinks';
 import type { GenerateRequest, GenerateResponse } from '@/services/api';
-import { generateAppraisal } from '@/services/api';
+import { generateAppraisal, getLuckyProperty } from '@/services/api';
 
 // ---------------------------------------------------------------------------
 // Application state machine
@@ -27,6 +27,25 @@ export default function App() {
   const handleSubmit = useCallback(async (data: GenerateRequest) => {
     try {
       const response: GenerateResponse = await generateAppraisal(data);
+      setState({ view: 'processing', jobId: response.job_id });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'An unexpected error occurred.';
+      setState({ view: 'error', message });
+    }
+  }, []);
+
+  const handleLucky = useCallback(async () => {
+    try {
+      const luckyData = await getLuckyProperty();
+      const response: GenerateResponse = await generateAppraisal({
+        address: luckyData.address,
+        city: luckyData.city,
+        state: luckyData.state,
+        units: luckyData.units,
+        year_built: luckyData.year_built,
+        property_type: luckyData.property_type,
+      });
       setState({ view: 'processing', jobId: response.job_id });
     } catch (err) {
       const message =
@@ -72,10 +91,10 @@ export default function App() {
           </div>
           <div>
             <h1 className="text-lg font-bold tracking-tight text-slate-900 sm:text-xl">
-              Synthetic Appraisal Generator
+              Smaug: The Synthetic Multifamily Appraisal/Underwriting Generator
             </h1>
             <p className="hidden text-xs text-slate-500 sm:block">
-              AI-powered multifamily property appraisal reports
+              AI-powered multifamily appraisal and underwriting packages
             </p>
           </div>
         </div>
@@ -84,8 +103,21 @@ export default function App() {
       {/* Main content */}
       <main className="mx-auto max-w-4xl px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
         {state.view === 'form' && (
-          <div className="fade-in">
-            <PropertyForm onSubmit={handleSubmit} />
+          <div className="fade-in space-y-6">
+            <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+              <img
+                src="/smaug-hero.jpg"
+                alt="Smaug-inspired dragon mascot overlooking a multifamily tower"
+                className="h-56 w-full object-cover sm:h-72"
+              />
+              <div className="px-4 py-3 sm:px-6">
+                <p className="text-sm text-slate-600">
+                  Meet Smaug: your AI co-pilot for synthetic multifamily
+                  appraisal and underwriting packages.
+                </p>
+              </div>
+            </div>
+            <PropertyForm onSubmit={handleSubmit} onLucky={handleLucky} />
           </div>
         )}
 
@@ -139,7 +171,7 @@ export default function App() {
       {/* Footer */}
       <footer className="mt-auto border-t border-slate-200 bg-white/60 py-4">
         <p className="text-center text-xs text-slate-400">
-          Synthetic Appraisal Generator &mdash; For demonstration &amp;
+          Smaug &mdash; The Synthetic Multifamily Appraisal/Underwriting Generator &mdash; For demonstration &amp;
           development purposes only.
         </p>
       </footer>

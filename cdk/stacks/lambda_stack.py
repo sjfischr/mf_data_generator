@@ -140,6 +140,13 @@ class LambdaStack(Stack):
             timeout_minutes=5,
         )
 
+        self.lucky_generator = self._create_lambda(
+            "LuckyGenerator",
+            handler_path="lambdas/lucky_generator",
+            memory_size=512,
+            timeout_minutes=2,
+        )
+
         # Wire Step Functions ARN and permissions using the known state machine name.
         # This avoids cyclic cross-stack references.
         sfn_arn = f"arn:aws:states:{self.region}:{self.account}:stateMachine:AppraisalPipelineStateMachine"
