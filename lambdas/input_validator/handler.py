@@ -88,6 +88,7 @@ def _validate_input(raw_body: dict) -> tuple[dict | None, list[dict]]:
         })
 
     validated = {
+        "property_name": str(raw_body.get("property_name", "")).strip(),
         "address": str(raw_body.get("address", "")).strip(),
         "city": str(raw_body.get("city", "")).strip(),
         "state": str(raw_body.get("state", "")).strip(),
@@ -110,6 +111,15 @@ def handler(event, context):
     the fields defined by ``UserInput``.
     """
     logger.info("Received event: %s", json.dumps(event, default=str))
+
+    # ------------------------------------------------------------------
+    # 0. Step Functions passthrough mode
+    # ------------------------------------------------------------------
+    if isinstance(event, dict) and "job_id" in event and "body" not in event:
+        return {
+            "job_id": event["job_id"],
+            "status": "validated",
+        }
 
     # ------------------------------------------------------------------
     # 1. Parse body

@@ -123,6 +123,7 @@ def _build_prompt(user_input: dict, job_id: str) -> str:
     Generate complete, realistic crosswalk data for a synthetic multifamily
     appraisal report based on the following user input:
 
+    Property Name: {user_input.get('property_name') or 'Generate an appropriate professional property name'}
     Property Address: {user_input['address']}
     City: {user_input['city']}
     State: {user_input['state']}

@@ -39,6 +39,7 @@ export default function App() {
     try {
       const luckyData = await getLuckyProperty();
       const response: GenerateResponse = await generateAppraisal({
+        property_name: luckyData.property_name,
         address: luckyData.address,
         city: luckyData.city,
         state: luckyData.state,

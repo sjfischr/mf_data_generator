@@ -74,6 +74,7 @@ interface Props {
 }
 
 interface FormData {
+  property_name: string;
   address: string;
   city: string;
   state: string;
@@ -85,6 +86,7 @@ interface FormData {
 type FormErrors = Partial<Record<keyof FormData, string>>;
 
 const INITIAL_FORM: FormData = {
+  property_name: '',
   address: '',
   city: '',
   state: '',
@@ -175,6 +177,7 @@ export default function PropertyForm({ onSubmit, onLucky }: Props) {
       setSubmitting(true);
       try {
         await onSubmit({
+          property_name: form.property_name.trim() || undefined,
           address: form.address.trim(),
           city: form.city.trim(),
           state: form.state,
@@ -217,6 +220,22 @@ export default function PropertyForm({ onSubmit, onLucky }: Props) {
 
       {/* Card */}
       <form onSubmit={handleSubmit} noValidate className="card space-y-6">
+        {/* Property Name */}
+        <div>
+          <label htmlFor="property_name" className="label">
+            Property Name (optional)
+          </label>
+          <input
+            id="property_name"
+            name="property_name"
+            type="text"
+            placeholder="Smaug Court Apartments"
+            value={form.property_name}
+            onChange={handleChange}
+            className={inputClass('property_name')}
+          />
+        </div>
+
         {/* Address */}
         <div>
           <label htmlFor="address" className="label">
