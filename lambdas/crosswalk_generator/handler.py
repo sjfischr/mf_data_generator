@@ -219,7 +219,7 @@ def _create_crosswalk_agent() -> Agent:
     model = BedrockModel(
         model_id="us.anthropic.claude-3-5-haiku-20241022-v1:0",
         region_name=REGION,
-        max_tokens=16384,
+      max_tokens=8192,
         temperature=0.3,
     )
 
