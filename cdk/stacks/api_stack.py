@@ -44,7 +44,7 @@ class ApiStack(Stack):
         # (e.g. Lambda/Integration failures that surface as 5XX).
         self.api.add_gateway_response(
             "Default4xxCors",
-            type=apigw.ResponseType.DEFAULT_4XX,
+            type=apigw.ResponseType.DEFAULT_4_XX,
             response_headers={
                 "Access-Control-Allow-Origin": "'*'",
                 "Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'",
@@ -53,7 +53,7 @@ class ApiStack(Stack):
         )
         self.api.add_gateway_response(
             "Default5xxCors",
-            type=apigw.ResponseType.DEFAULT_5XX,
+            type=apigw.ResponseType.DEFAULT_5_XX,
             response_headers={
                 "Access-Control-Allow-Origin": "'*'",
                 "Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'",
