@@ -12,9 +12,6 @@ import os
 import uuid
 
 import boto3
-from pydantic import ValidationError
-
-from lambdas.shared.models import UserInput
 from lambdas.shared import s3_utils
 
 logger = logging.getLogger(__name__)
@@ -23,6 +20,16 @@ logger.setLevel(logging.INFO)
 STEP_FUNCTION_ARN = os.environ.get("STEP_FUNCTION_ARN", "")
 
 _sfn_client = None
+
+REQUIRED_FIELDS = [
+    "address",
+    "city",
+    "state",
+    "units",
+    "year_built",
+    "property_type",
+]
+ALLOWED_PROPERTY_TYPES = {"garden-style", "mid-rise", "high-rise"}
 
 
 def _get_sfn_client():
@@ -44,6 +51,56 @@ def _api_response(status_code: int, body: dict) -> dict:
         },
         "body": json.dumps(body),
     }
+
+
+def _validate_input(raw_body: dict) -> tuple[dict | None, list[dict]]:
+    errors: list[dict] = []
+
+    for field in REQUIRED_FIELDS:
+        if field not in raw_body:
+            errors.append({"field": field, "message": "Field required", "type": "missing"})
+
+    if errors:
+        return None, errors
+
+    try:
+        units = int(raw_body["units"])
+        if units <= 0:
+            raise ValueError("must be greater than 0")
+    except Exception:
+        errors.append({"field": "units", "message": "units must be a positive integer", "type": "value_error"})
+        units = raw_body.get("units")
+
+    try:
+        year_built = int(raw_body["year_built"])
+        if year_built < 1800 or year_built > 2100:
+            raise ValueError("out of range")
+    except Exception:
+        errors.append({"field": "year_built", "message": "year_built must be an integer between 1800 and 2100", "type": "value_error"})
+        year_built = raw_body.get("year_built")
+
+    property_type = str(raw_body.get("property_type", "")).strip()
+    if property_type not in ALLOWED_PROPERTY_TYPES:
+        errors.append({
+            "field": "property_type",
+            "message": "property_type must be one of: garden-style, mid-rise, high-rise",
+            "type": "value_error",
+        })
+
+    validated = {
+        "address": str(raw_body.get("address", "")).strip(),
+        "city": str(raw_body.get("city", "")).strip(),
+        "state": str(raw_body.get("state", "")).strip(),
+        "units": units,
+        "year_built": year_built,
+        "property_type": property_type,
+    }
+
+    for field in ["address", "city", "state"]:
+        if not validated[field]:
+            errors.append({"field": field, "message": f"{field} cannot be empty", "type": "value_error"})
+
+    return (validated if not errors else None), errors
 
 
 def handler(event, context):
@@ -70,23 +127,14 @@ def handler(event, context):
         return _api_response(400, {"error": "Invalid JSON in request body."})
 
     # ------------------------------------------------------------------
-    # 2. Validate with Pydantic
+    # 2. Validate request fields
     # ------------------------------------------------------------------
-    try:
-        user_input = UserInput.model_validate(raw_body)
-    except ValidationError as exc:
-        logger.warning("Validation failed: %s", exc)
-        errors = exc.errors()
+    user_input, validation_errors = _validate_input(raw_body)
+    if validation_errors:
+        logger.warning("Validation failed: %s", validation_errors)
         return _api_response(400, {
             "error": "Validation failed.",
-            "details": [
-                {
-                    "field": ".".join(str(loc) for loc in e["loc"]),
-                    "message": e["msg"],
-                    "type": e["type"],
-                }
-                for e in errors
-            ],
+            "details": validation_errors,
         })
 
     # ------------------------------------------------------------------
@@ -94,13 +142,13 @@ def handler(event, context):
     # ------------------------------------------------------------------
     job_id = str(uuid.uuid4())
     logger.info("Created job_id=%s for %s, %s %s",
-                job_id, user_input.address, user_input.city, user_input.state)
+                job_id, user_input["address"], user_input["city"], user_input["state"])
 
     # Create the S3 folder structure
     s3_utils.create_job_structure(job_id)
 
     # Persist the validated input
-    input_dict = user_input.model_dump()
+    input_dict = dict(user_input)
     input_dict["job_id"] = job_id
     s3_utils.write_json(job_id, "input.json", input_dict)
 
