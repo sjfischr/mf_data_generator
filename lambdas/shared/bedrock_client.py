@@ -11,7 +11,7 @@ import boto3
 logger = logging.getLogger(__name__)
 
 MODELS = {
-    "haiku": "arn:aws:bedrock:us-east-1:918221680168:inference-profile/global.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "haiku": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     "sonnet": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
     "opus": "us.anthropic.claude-opus-4-6-20250923-v1:0",
 }

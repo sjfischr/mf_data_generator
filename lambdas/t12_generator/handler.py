@@ -234,9 +234,9 @@ def handler(event, context):
 
     # Generate T-12s for each historical year
     for year_key, year_label in [
-        ("year_1", "Year 1"),
-        ("year_2", "Year 2"),
-        ("year_3", "Year 3"),
+        ("Year 1", "Year 1"),
+        ("Year 2", "Year 2"),
+        ("Year 3", "Year 3"),
     ]:
         t12_bytes = generate_t12(crosswalk, year_key, year_label)
         s3_utils.write_bytes(
