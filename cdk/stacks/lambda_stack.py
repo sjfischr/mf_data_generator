@@ -1,6 +1,7 @@
 from aws_cdk import (
     Stack,
     Duration,
+    BundlingOptions,
     aws_lambda as _lambda,
     aws_s3 as s3,
     aws_sns as sns,
@@ -47,7 +48,7 @@ class LambdaStack(Stack):
             "SharedLayer",
             code=_lambda.Code.from_asset(
                 ".",
-                bundling=_lambda.BundlingOptions(
+                bundling=BundlingOptions(
                     image=_lambda.Runtime.PYTHON_3_11.bundling_image,
                     command=[
                         "bash",
