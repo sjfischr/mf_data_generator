@@ -28,6 +28,14 @@ class IncomeCapitalizationGenerator(SectionGenerator):
     def get_model_name(self) -> str:
         return "opus"
 
+    def get_tools(self) -> list:
+        from lambdas.shared.agent_tools import (
+            verify_sum,
+            compute_financial_metrics,
+            compute_valuation_metrics,
+        )
+        return [verify_sum, compute_financial_metrics, compute_valuation_metrics]
+
     def get_system_prompt(self) -> str:
         return (
             "You are an MAI-certified commercial real estate appraiser with "

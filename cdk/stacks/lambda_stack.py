@@ -75,8 +75,8 @@ class LambdaStack(Stack):
         self.crosswalk_generator = self._create_lambda(
             "CrosswalkGenerator",
             handler_path="lambdas/crosswalk_generator",
-            memory_size=512,
-            timeout_minutes=5,
+            memory_size=1024,
+            timeout_minutes=10,
         )
 
         self.image_generator = self._create_lambda(
@@ -115,12 +115,12 @@ class LambdaStack(Stack):
         for i in range(1, 13):
             section_name = f"section_{i:02d}"
             construct_name = f"Section{i:02d}Generator"
-            memory = 1024  # Opus sections get 1024MB
+            memory = 1024  # All section agents get 1024MB
             fn = self._create_lambda(
                 construct_name,
                 handler_path=f"lambdas/section_generators/{section_name}",
                 memory_size=memory,
-                timeout_minutes=5,
+                timeout_minutes=10,
             )
             self.section_lambdas[section_name] = fn
 
