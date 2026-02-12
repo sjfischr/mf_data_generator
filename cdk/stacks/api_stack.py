@@ -40,6 +40,27 @@ class ApiStack(Stack):
             ),
         )
 
+        # Ensure CORS headers are present even for API Gateway-generated errors
+        # (e.g. Lambda/Integration failures that surface as 5XX).
+        self.api.add_gateway_response(
+            "Default4xxCors",
+            type=apigw.ResponseType.DEFAULT_4XX,
+            response_headers={
+                "Access-Control-Allow-Origin": "'*'",
+                "Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'",
+                "Access-Control-Allow-Methods": "'OPTIONS,GET,POST'",
+            },
+        )
+        self.api.add_gateway_response(
+            "Default5xxCors",
+            type=apigw.ResponseType.DEFAULT_5XX,
+            response_headers={
+                "Access-Control-Allow-Origin": "'*'",
+                "Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'",
+                "Access-Control-Allow-Methods": "'OPTIONS,GET,POST'",
+            },
+        )
+
         # /api resource
         api_resource = self.api.root.add_resource("api")
 

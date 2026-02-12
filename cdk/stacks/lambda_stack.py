@@ -41,13 +41,25 @@ class LambdaStack(Stack):
             resources=["*"],
         )
 
-        # Shared Lambda layer for common code
+        # Shared Lambda layer for dependencies + shared code
         self.shared_layer = _lambda.LayerVersion(
             self,
             "SharedLayer",
-            code=_lambda.Code.from_asset("lambdas/shared"),
+            code=_lambda.Code.from_asset(
+                ".",
+                bundling=_lambda.BundlingOptions(
+                    image=_lambda.Runtime.PYTHON_3_11.bundling_image,
+                    command=[
+                        "bash",
+                        "-c",
+                        "pip install -r lambdas/requirements-runtime.txt -t /asset-output/python "
+                        "&& mkdir -p /asset-output/python/lambdas "
+                        "&& cp -r lambdas/shared /asset-output/python/lambdas/",
+                    ],
+                ),
+            ),
             compatible_runtimes=[_lambda.Runtime.PYTHON_3_11],
-            description="Shared utilities for appraisal generator Lambdas",
+            description="Shared dependencies and utilities for appraisal generator Lambdas",
         )
 
         # --- Core pipeline Lambdas ---
