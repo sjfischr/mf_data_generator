@@ -1,0 +1,18 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "states:DescribeExecution",
+        "states:ListExecutions",
+        "states:GetExecutionHistory",
+        "states:DescribeStateMachine"
+      ],
+      "Resource": [
+        "arn:aws:states:us-east-1:918221680168:stateMachine:AppraisalPipelineStateMachine",
+        "arn:aws:states:us-east-1:918221680168:execution:AppraisalPipelineStateMachine:*"
+      ]
+    }
+  ]
+}

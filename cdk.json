@@ -1,0 +1,22 @@
+{
+  "app": "python cdk/app.py",
+  "watch": {
+    "include": [
+      "cdk/**",
+      "lambdas/**"
+    ],
+    "exclude": [
+      "**/__pycache__",
+      "**/*.pyc",
+      "**/.pytest_cache",
+      "**/node_modules"
+    ]
+  },
+  "context": {
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/core:stackRelativeExports": true,
+    "@aws-cdk/aws-apigateway:usagePlanKeyOrderInsensitiveId": true,
+    "@aws-cdk/core:enablePartitionLiterals": true,
+    "@aws-cdk/aws-s3:serverAccessLogsUseBucketPolicy": true
+  }
+}
