@@ -4,9 +4,13 @@ import io
 import json
 import logging
 import os
-import subprocess
+import re
 import tempfile
 import zipfile
+
+from docx import Document
+from docx.shared import Pt, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from lambdas.shared import s3_utils
 from lambdas.shared.models import CrosswalkData
@@ -76,47 +80,161 @@ def insert_images(markdown: str, job_id: str) -> str:
 
 
 def markdown_to_docx(markdown: str, job_id: str) -> bytes:
-    """Convert markdown to DOCX using pandoc."""
+    """Convert markdown to DOCX using python-docx."""
+    doc = Document()
+    
+    # Set document margins
+    sections = doc.sections
+    for section in sections:
+        section.top_margin = Inches(1)
+        section.bottom_margin = Inches(1)
+        section.left_margin = Inches(1)
+        section.right_margin = Inches(1)
+    
+    # Download images to temp dir if needed
+    image_files = {}
     with tempfile.TemporaryDirectory() as tmpdir:
-        md_path = os.path.join(tmpdir, "report.md")
-        docx_path = os.path.join(tmpdir, "report.docx")
-
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(markdown)
-
-        # Download images to temp dir for pandoc
         try:
             manifest = s3_utils.read_json(job_id, "images/manifest.json")
             img_dir = os.path.join(tmpdir, "images")
             os.makedirs(img_dir, exist_ok=True)
-
+            
             s3 = s3_utils.get_s3_client()
             for entry in manifest:
                 if entry.get("status") == "success":
                     s3_key = entry["s3_key"]
                     local_path = os.path.join(img_dir, entry["filename"])
                     s3.download_file(s3_utils.BUCKET, s3_key, local_path)
+                    image_files[entry["filename"]] = local_path
         except Exception as e:
             logger.warning("Could not download images: %s", e)
+        
+        # Parse markdown line by line
+        lines = markdown.split('\n')
+        i = 0
+        in_list = False
+        
+        while i < len(lines):
+            line = lines[i]
+            
+            # Page break
+            if line.strip() == '\\newpage':
+                doc.add_page_break()
+                i += 1
+                continue
+            
+            # Heading 1
+            if line.startswith('# '):
+                text = line[2:].strip()
+                doc.add_heading(text, level=1)
+                i += 1
+                continue
+            
+            # Heading 2
+            if line.startswith('## '):
+                text = line[3:].strip()
+                doc.add_heading(text, level=2)
+                i += 1
+                continue
+            
+            # Heading 3
+            if line.startswith('### '):
+                text = line[4:].strip()
+                doc.add_heading(text, level=3)
+                i += 1
+                continue
+            
+            # Image reference
+            img_match = re.match(r'!\[([^\]]*)\]\(([^\)]+)\)', line.strip())
+            if img_match:
+                alt_text = img_match.group(1)
+                img_path = img_match.group(2)
+                filename = os.path.basename(img_path)
+                
+                if filename in image_files:
+                    try:
+                        doc.add_picture(image_files[filename], width=Inches(5))
+                        last_paragraph = doc.paragraphs[-1]
+                        last_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        if alt_text:
+                            caption = doc.add_paragraph(alt_text)
+                            caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            caption.runs[0].font.size = Pt(10)
+                            caption.runs[0].font.italic = True
+                    except Exception as e:
+                        logger.warning("Could not insert image %s: %s", filename, e)
+                        doc.add_paragraph(f"[Image: {alt_text}]")
+                else:
+                    doc.add_paragraph(f"[Image: {alt_text}]")
+                i += 1
+                continue
+            
+            # Bullet list item
+            if line.strip().startswith('- ') or line.strip().startswith('* '):
+                text = line.strip()[2:].strip()
+                text = apply_inline_formatting(text)
+                p = doc.add_paragraph(style='List Bullet')
+                add_formatted_text(p, text)
+                in_list = True
+                i += 1
+                continue
+            
+            # Numbered list item
+            num_match = re.match(r'^\s*\d+\.\s+(.+)$', line)
+            if num_match:
+                text = num_match.group(1).strip()
+                text = apply_inline_formatting(text)
+                p = doc.add_paragraph(style='List Number')
+                add_formatted_text(p, text)
+                in_list = True
+                i += 1
+                continue
+            
+            # Empty line
+            if not line.strip():
+                if in_list:
+                    in_list = False
+                i += 1
+                continue
+            
+            # Regular paragraph
+            if line.strip():
+                in_list = False
+                text = apply_inline_formatting(line.strip())
+                p = doc.add_paragraph()
+                add_formatted_text(p, text)
+            
+            i += 1
+    
+    # Save to bytes
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf.read()
 
-        # Run pandoc
-        cmd = [
-            "pandoc", md_path,
-            "-o", docx_path,
-            "--from", "markdown",
-            "--to", "docx",
-            "--toc",
-            "--toc-depth=3",
-            f"--resource-path={tmpdir}",
-        ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0:
-            logger.error("Pandoc failed: %s", result.stderr)
-            raise RuntimeError(f"Pandoc conversion failed: {result.stderr}")
+def apply_inline_formatting(text: str) -> str:
+    """Preserve formatting markersto process later."""
+    return text
 
-        with open(docx_path, "rb") as f:
-            return f.read()
+
+def add_formatted_text(paragraph, text: str):
+    """Add text with inline formatting (bold, italic) to a paragraph."""
+    # Simple regex-based parser for **bold** and *italic*
+    pattern = re.compile(r'(\*\*[^*]+\*\*|\*[^*]+\*|[^*]+)')
+    parts = pattern.findall(text)
+    
+    for part in parts:
+        if part.startswith('**') and part.endswith('**'):
+            # Bold
+            run = paragraph.add_run(part[2:-2])
+            run.bold = True
+        elif part.startswith('*') and part.endswith('*'):
+            # Italic  
+            run = paragraph.add_run(part[1:-1])
+            run.italic = True
+        else:
+            paragraph.add_run(part)
 
 
 def create_zip_package(job_id: str, docx_bytes: bytes) -> bytes:
