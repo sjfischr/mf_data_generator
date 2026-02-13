@@ -28,7 +28,7 @@ class MarketAnalysisGenerator(SectionGenerator):
         return "sonnet"
 
     def get_max_tokens(self) -> int:
-        return 12000  # 6-8 pages requires higher token limit
+        return 16000  # 6-8 pages requires higher token limit
 
     def get_system_prompt(self) -> str:
         return (
