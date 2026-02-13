@@ -34,6 +34,9 @@ SECTION_ORDER = [
 
 LENDER_NAME = "NorthBridge Multifamily Capital"
 REPORT_TITLE = "Synthetic Multifamily Appraisal Report"
+STOPWORDS = {
+    "a", "an", "and", "at", "by", "for", "from", "in", "into", "is", "of", "on", "or", "the", "to", "with",
+}
 
 
 def get_cover_metadata(job_id: str) -> tuple[str, str]:
@@ -156,22 +159,51 @@ def insert_images(markdown: str, job_id: str) -> str:
         logger.warning("Image manifest not found, skipping image insertion")
         return markdown
 
-    # Build lookup by description keywords
-    image_lookup = {}
-    for entry in manifest:
-        if entry.get("status") == "success":
-            desc_lower = entry.get("description", "").lower()
-            image_lookup[entry["filename"]] = entry
+    image_entries = [entry for entry in manifest if entry.get("status") == "success" and entry.get("filename")]
+    if not image_entries:
+        logger.warning("No successful images found in manifest, skipping image insertion")
+        return markdown
 
-    # Simple replacement: replace [IMAGE: ...] with markdown image syntax
-    import re
+    used_filenames: set[str] = set()
+
+    def tokenize(text: str) -> set[str]:
+        return {
+            token
+            for token in re.findall(r"[a-z0-9]+", (text or "").lower())
+            if token and len(token) > 2 and token not in STOPWORDS
+        }
+
+    def score_match(desc_tokens: set[str], entry: dict) -> int:
+        haystack = f"{entry.get('description', '')} {entry.get('filename', '')}".lower()
+        haystack_tokens = tokenize(haystack)
+        overlap = len(desc_tokens & haystack_tokens)
+        bonus = 0
+        if "aerial" in desc_tokens and "aerial" in haystack_tokens:
+            bonus += 2
+        if "exterior" in desc_tokens and "exterior" in haystack_tokens:
+            bonus += 2
+        if "interior" in desc_tokens and "interior" in haystack_tokens:
+            bonus += 2
+        return overlap + bonus
 
     def replace_image(match):
         desc = match.group(1).strip()
-        # Try to find a matching image
-        for filename, entry in image_lookup.items():
-            if any(word in entry.get("description", "").lower() for word in desc.lower().split()):
-                return f"![{desc}](images/{filename})"
+        desc_tokens = tokenize(desc)
+
+        available = [entry for entry in image_entries if entry["filename"] not in used_filenames]
+        if not available:
+            available = image_entries
+
+        best_entry = max(
+            available,
+            key=lambda entry: (score_match(desc_tokens, entry), entry.get("filename", "")),
+        )
+
+        filename = best_entry.get("filename")
+        if filename:
+            used_filenames.add(filename)
+            return f"![{desc}](images/{filename})"
+
         return f"*[Photo: {desc}]*"
 
     return re.sub(r"\[IMAGE:\s*([^\]]+)\]", replace_image, markdown)
@@ -223,9 +255,35 @@ def markdown_to_docx(markdown: str, job_id: str) -> bytes:
         
         while i < len(lines):
             line = lines[i]
+            stripped_line = line.strip()
+
+            # Markdown tables
+            if is_markdown_table_line(line):
+                table_lines = []
+                while i < len(lines) and is_markdown_table_line(lines[i]):
+                    table_lines.append(lines[i])
+                    i += 1
+
+                if render_markdown_table(doc, table_lines):
+                    in_list = False
+                    continue
+
+                # Fallback to plain text if table parsing fails
+                for raw in table_lines:
+                    raw_stripped = raw.strip()
+                    if raw_stripped:
+                        p = doc.add_paragraph()
+                        add_formatted_text(p, apply_inline_formatting(raw_stripped))
+                in_list = False
+                continue
+
+            # Ignore pure pipe/separator artifacts like "|||||"
+            if re.match(r'^\s*\|[\s\|\-:]*\|\s*$', stripped_line):
+                i += 1
+                continue
             
             # Page break
-            if line.strip() == '\\newpage':
+            if stripped_line == '\\newpage':
                 doc.add_page_break()
                 i += 1
                 continue
@@ -252,7 +310,7 @@ def markdown_to_docx(markdown: str, job_id: str) -> bytes:
                 continue
             
             # Image reference
-            img_match = re.match(r'!\[([^\]]*)\]\(([^\)]+)\)', line.strip())
+            img_match = re.match(r'!\[([^\]]*)\]\(([^\)]+)\)', stripped_line)
             if img_match:
                 alt_text = img_match.group(1)
                 img_path = img_match.group(2)
@@ -277,8 +335,8 @@ def markdown_to_docx(markdown: str, job_id: str) -> bytes:
                 continue
             
             # Bullet list item
-            if line.strip().startswith('- ') or line.strip().startswith('* '):
-                text = line.strip()[2:].strip()
+            if stripped_line.startswith('- ') or stripped_line.startswith('* '):
+                text = stripped_line[2:].strip()
                 text = apply_inline_formatting(text)
                 p = doc.add_paragraph(style='List Bullet')
                 add_formatted_text(p, text)
@@ -298,16 +356,16 @@ def markdown_to_docx(markdown: str, job_id: str) -> bytes:
                 continue
             
             # Empty line
-            if not line.strip():
+            if not stripped_line:
                 if in_list:
                     in_list = False
                 i += 1
                 continue
             
             # Regular paragraph
-            if line.strip():
+            if stripped_line:
                 in_list = False
-                text = apply_inline_formatting(line.strip())
+                text = apply_inline_formatting(stripped_line)
                 p = doc.add_paragraph()
                 add_formatted_text(p, text)
             
@@ -323,6 +381,57 @@ def markdown_to_docx(markdown: str, job_id: str) -> bytes:
 def apply_inline_formatting(text: str) -> str:
     """Preserve formatting markersto process later."""
     return text
+
+
+def is_markdown_table_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if not (stripped.startswith("|") and stripped.endswith("|")):
+        return False
+    return stripped.count("|") >= 3
+
+
+def is_markdown_separator_row(line: str) -> bool:
+    stripped = line.strip()
+    if not is_markdown_table_line(stripped):
+        return False
+    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+    return all(c and re.fullmatch(r":?-{3,}:?", c) for c in cells)
+
+
+def parse_markdown_table_row(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def render_markdown_table(doc: Document, table_lines: list[str]) -> bool:
+    if not table_lines:
+        return False
+
+    rows = [parse_markdown_table_row(line) for line in table_lines if not is_markdown_separator_row(line)]
+    rows = [row for row in rows if row]
+
+    if len(rows) < 2:
+        return False
+
+    col_count = max(len(row) for row in rows)
+    if col_count == 0:
+        return False
+
+    table = doc.add_table(rows=len(rows), cols=col_count)
+    table.style = "Table Grid"
+
+    for row_index, row in enumerate(rows):
+        for col_index in range(col_count):
+            cell_text = row[col_index] if col_index < len(row) else ""
+            paragraph = table.cell(row_index, col_index).paragraphs[0]
+            paragraph.clear()
+            add_formatted_text(paragraph, apply_inline_formatting(cell_text))
+            if row_index == 0:
+                for run in paragraph.runs:
+                    run.bold = True
+
+    return True
 
 
 def add_formatted_text(paragraph, text: str):
