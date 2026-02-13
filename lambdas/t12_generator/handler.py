@@ -167,7 +167,8 @@ def generate_t12(crosswalk: CrosswalkData, year_key: str, year_label: str) -> by
     # Distribute annual values across months with slight variation
     def monthly_spread(annual: int) -> list[int]:
         base = annual // 12
-        values = [base + random.randint(-int(base * 0.05), int(base * 0.05)) for _ in range(11)]
+        variation = int(abs(base) * 0.05)  # Use absolute value to handle negative values
+        values = [base + random.randint(-variation, variation) for _ in range(11)]
         values.append(annual - sum(values))
         return values
 
