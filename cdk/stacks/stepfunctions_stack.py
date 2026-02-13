@@ -146,7 +146,7 @@ class StepFunctionsStack(Stack):
 
         # Wire up the QC choice
         qc_choice.when(
-            sfn.Condition.string_equals("$.qc_status", "PASSED"),
+            sfn.Condition.string_equals("$.qc_status", "PASS"),
             assemble_report.next(notify_success).next(succeed_state),
         )
         qc_choice.otherwise(notify_error_state)
