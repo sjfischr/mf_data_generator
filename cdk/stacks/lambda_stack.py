@@ -32,12 +32,14 @@ class LambdaStack(Stack):
             "SNS_TOPIC_ARN": topic.topic_arn,
         }
 
-        # Bedrock invoke policy
+        # Bedrock invoke policy (includes Marketplace permissions for inference profiles)
         self.bedrock_policy = iam.PolicyStatement(
             effect=iam.Effect.ALLOW,
             actions=[
                 "bedrock:InvokeModel",
                 "bedrock:InvokeModelWithResponseStream",
+                "aws-marketplace:ViewSubscriptions",
+                "aws-marketplace:Subscribe",
             ],
             resources=["*"],
         )
