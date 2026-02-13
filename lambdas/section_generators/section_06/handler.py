@@ -27,6 +27,9 @@ class SalesComparisonGenerator(SectionGenerator):
     def get_model_name(self) -> str:
         return "opus"
 
+    def get_max_tokens(self) -> int:
+        return 10000  # 4-6 pages requires higher token limit
+
     def get_tools(self) -> list:
         from lambdas.shared.agent_tools import (
             verify_sum,

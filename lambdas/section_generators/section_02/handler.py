@@ -27,6 +27,9 @@ class PropertyDescriptionGenerator(SectionGenerator):
     def get_model_name(self) -> str:
         return "sonnet"
 
+    def get_max_tokens(self) -> int:
+        return 16000  # 8-10 pages requires higher token limit
+
     def get_system_prompt(self) -> str:
         return (
             "You are an MAI-certified commercial real estate appraiser with "
