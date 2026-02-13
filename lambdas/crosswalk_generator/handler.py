@@ -217,7 +217,7 @@ def _validate_crosswalk(crosswalk: CrosswalkData) -> list[str]:
 def _create_crosswalk_agent() -> Agent:
     """Create the Strands agent for crosswalk generation."""
     model = BedrockModel(
-        model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        model_id="anthropic.claude-haiku-4-5-20251001-v1:0",
         region_name=REGION,
         max_tokens=8192,
         temperature=0.3,
