@@ -104,6 +104,9 @@ def handler(event, context):
     job_id = event["job_id"]
     logger.info("Generating images for job %s", job_id)
 
+    if not os.environ.get("REPLICATE_API_TOKEN"):
+        raise RuntimeError("REPLICATE_API_TOKEN is not configured")
+
     # Load crosswalk data
     data = s3_utils.read_json(job_id, "crosswalk-data.json")
     crosswalk = CrosswalkData.model_validate(data)
@@ -128,12 +131,23 @@ def handler(event, context):
 
     succeeded = sum(1 for m in manifest if m["status"] == "success")
     failed = sum(1 for m in manifest if m["status"] == "failed")
+    failed_items = [m for m in manifest if m["status"] == "failed"]
 
     logger.info("Images complete: %d succeeded, %d failed", succeeded, failed)
 
+    if succeeded == 0:
+        sample_errors = [item.get("error", "Unknown error") for item in failed_items[:5]]
+        raise RuntimeError(
+            "Image generation failed for all prompts. "
+            f"Failed count={failed}. Sample errors={sample_errors}"
+        )
+
+    status = "success" if failed == 0 else "partial_success"
+
     return {
-        "status": "success",
+        "status": status,
         "job_id": job_id,
         "images_generated": succeeded,
         "images_failed": failed,
+        "failed_examples": failed_items[:5],
     }

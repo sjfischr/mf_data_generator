@@ -32,6 +32,104 @@ SECTION_ORDER = [
     "section_12_addenda",
 ]
 
+LENDER_NAME = "NorthBridge Multifamily Capital"
+REPORT_TITLE = "Synthetic Multifamily Appraisal Report"
+
+
+def get_cover_metadata(job_id: str) -> tuple[str, str]:
+    """Resolve property name and location text for the cover page."""
+    property_name = "Subject Property"
+    location_text = ""
+
+    try:
+        crosswalk_data = s3_utils.read_json(job_id, "crosswalk-data.json")
+        crosswalk = CrosswalkData.model_validate(crosswalk_data)
+        prop = crosswalk.property_identification
+        property_name = prop.property_name or property_name
+        location_text = ", ".join(
+            [part for part in [prop.address, prop.city, prop.state] if part]
+        )
+    except Exception:
+        try:
+            input_data = s3_utils.read_json(job_id, "input.json")
+            property_name = input_data.get("property_name") or property_name
+            location_text = ", ".join(
+                [
+                    part
+                    for part in [
+                        input_data.get("address", ""),
+                        input_data.get("city", ""),
+                        input_data.get("state", ""),
+                    ]
+                    if part
+                ]
+            )
+        except Exception:
+            pass
+
+    return property_name, location_text
+
+
+def select_cover_image_filename(manifest: list[dict]) -> str | None:
+    """Choose the best generated image for the report cover."""
+    successful = [entry for entry in manifest if entry.get("status") == "success"]
+    if not successful:
+        return None
+
+    preferred_keywords = ("aerial", "exterior", "front", "facade", "building")
+    for entry in successful:
+        haystack = f"{entry.get('filename', '')} {entry.get('description', '')}".lower()
+        if any(keyword in haystack for keyword in preferred_keywords):
+            return entry.get("filename")
+
+    return successful[0].get("filename")
+
+
+def add_cover_page(doc: Document, property_name: str, location_text: str, cover_image_path: str | None):
+    """Insert a branded cover page at the beginning of the report."""
+    lender = doc.add_paragraph()
+    lender.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    lender_run = lender.add_run(LENDER_NAME)
+    lender_run.bold = True
+    lender_run.font.size = Pt(22)
+
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title_run = title.add_run(REPORT_TITLE)
+    title_run.bold = True
+    title_run.font.size = Pt(16)
+
+    doc.add_paragraph()
+
+    name_para = doc.add_paragraph()
+    name_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    name_run = name_para.add_run(property_name)
+    name_run.bold = True
+    name_run.font.size = Pt(28)
+
+    if location_text:
+        location_para = doc.add_paragraph()
+        location_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        location_run = location_para.add_run(location_text)
+        location_run.font.size = Pt(12)
+
+    doc.add_paragraph()
+
+    if cover_image_path:
+        try:
+            doc.add_picture(cover_image_path, width=Inches(6.2))
+            doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        except Exception as exc:
+            logger.warning("Could not add cover image: %s", exc)
+
+    date_para = doc.add_paragraph()
+    date_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    date_run = date_para.add_run("Prepared for synthetic loan package review")
+    date_run.italic = True
+    date_run.font.size = Pt(10)
+
+    doc.add_page_break()
+
 
 def collect_sections(job_id: str) -> str:
     """Read all section markdown files and combine in order."""
@@ -91,8 +189,11 @@ def markdown_to_docx(markdown: str, job_id: str) -> bytes:
         section.left_margin = Inches(1)
         section.right_margin = Inches(1)
     
+    property_name, location_text = get_cover_metadata(job_id)
+
     # Download images to temp dir if needed
     image_files = {}
+    cover_image_path = None
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
             manifest = s3_utils.read_json(job_id, "images/manifest.json")
@@ -106,8 +207,14 @@ def markdown_to_docx(markdown: str, job_id: str) -> bytes:
                     local_path = os.path.join(img_dir, entry["filename"])
                     s3.download_file(s3_utils.BUCKET, s3_key, local_path)
                     image_files[entry["filename"]] = local_path
+
+            cover_image_filename = select_cover_image_filename(manifest)
+            if cover_image_filename and cover_image_filename in image_files:
+                cover_image_path = image_files[cover_image_filename]
         except Exception as e:
             logger.warning("Could not download images: %s", e)
+
+        add_cover_page(doc, property_name, location_text, cover_image_path)
         
         # Parse markdown line by line
         lines = markdown.split('\n')

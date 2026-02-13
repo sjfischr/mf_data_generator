@@ -169,13 +169,19 @@ def handler(event, context):
     execution_input = json.dumps({"job_id": job_id})
 
     try:
+        execution_name = f"appraisal-{job_id}"
         sfn_response = sfn.start_execution(
             stateMachineArn=STEP_FUNCTION_ARN,
-            name=f"appraisal-{job_id}",
+            name=execution_name,
             input=execution_input,
         )
         execution_arn = sfn_response["executionArn"]
         logger.info("Started execution %s", execution_arn)
+
+        # Persist execution identifiers so status polling can resolve directly.
+        input_dict["execution_name"] = execution_name
+        input_dict["execution_arn"] = execution_arn
+        s3_utils.write_json(job_id, "input.json", input_dict)
     except Exception:
         logger.exception("Failed to start Step Functions execution")
         # The job data is already persisted -- we can still return the job_id

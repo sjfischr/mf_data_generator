@@ -8,6 +8,7 @@ from aws_cdk import (
     aws_iam as iam,
 )
 from constructs import Construct
+import os
 
 
 class LambdaStack(Stack):
@@ -25,6 +26,12 @@ class LambdaStack(Stack):
 
         self.bucket = bucket
         self.topic = topic
+
+        replicate_api_token = os.environ.get("REPLICATE_API_TOKEN", "").strip()
+        if not replicate_api_token:
+            raise ValueError(
+                "REPLICATE_API_TOKEN environment variable is required for ImageGenerator deployment"
+            )
 
         # Shared environment variables for all Lambdas
         self.shared_env = {
@@ -90,6 +97,7 @@ class LambdaStack(Stack):
             handler_path="lambdas/image_generator",
             memory_size=512,
             timeout_minutes=5,
+            extra_env={"REPLICATE_API_TOKEN": replicate_api_token},
         )
 
         self.qc_validator = self._create_lambda(

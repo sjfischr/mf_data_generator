@@ -17,6 +17,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
+  REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
 
 jobs:
   deploy:
