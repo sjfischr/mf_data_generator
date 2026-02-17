@@ -28,7 +28,7 @@ class PropertyDescriptionGenerator(SectionGenerator):
         return "sonnet"
 
     def get_max_tokens(self) -> int:
-        return 16000  # 8-10 pages requires higher token limit
+        return 24000  # Long-form section with image placeholders can exceed 16k
 
     def get_system_prompt(self) -> str:
         return (

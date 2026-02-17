@@ -43,3 +43,14 @@ htmlcov/
 *.log
 *.zip
 tmp_*.json
+
+# Local debugging artifacts
+execution_*.json
+execution_failed.json
+execution_history.json
+execution_latest.json
+execution_list.json
+crosswalk_*.json
+qc_*.json
+test_bedrock_access.py
+lambdas/test_bedrock/
