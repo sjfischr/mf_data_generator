@@ -273,6 +273,13 @@ def handler(event, context):
         # Force the correct job_id in case the model changed it
         crosswalk.job_id = job_id
 
+        # Deterministic guardrail: always recompute derived valuation metrics
+        # so downstream QC cannot fail on LLM rounding drift.
+        market_value = crosswalk.valuation.final_value_conclusion.market_value
+        total_units = crosswalk.property_physical.total_units
+        corrected_value_per_unit = round(market_value / total_units)
+        crosswalk.valuation.final_value_conclusion.value_per_unit = corrected_value_per_unit
+
         logger.info("Crosswalk generated and validated successfully")
 
     except Exception as exc:
