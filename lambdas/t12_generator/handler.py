@@ -234,14 +234,14 @@ def handler(event, context):
     )
 
     # Generate T-12s for each historical year
-    for year_key, year_label in [
-        ("Year 1", "Year 1"),
-        ("Year 2", "Year 2"),
-        ("Year 3", "Year 3"),
+    for year_key, year_label, output_name in [
+        ("Year 1", "Year 1", "t12_year1.xlsx"),
+        ("Year 2", "Year 2", "t12_year2.xlsx"),
+        ("Year 3", "Year 3", "t12_year3.xlsx"),
     ]:
         t12_bytes = generate_t12(crosswalk, year_key, year_label)
         s3_utils.write_bytes(
-            job_id, f"outputs/t12_{year_key}.xlsx", t12_bytes,
+            job_id, f"outputs/{output_name}", t12_bytes,
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 

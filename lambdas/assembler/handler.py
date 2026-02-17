@@ -464,19 +464,31 @@ def create_zip_package(job_id: str, docx_bytes: bytes) -> bytes:
         # Add Excel files
         s3 = s3_utils.get_s3_client()
         excel_files = [
-            "outputs/rent_roll.xlsx",
-            "outputs/t12_year1.xlsx",
-            "outputs/t12_year2.xlsx",
-            "outputs/t12_year3.xlsx",
+            ["outputs/rent_roll.xlsx"],
+            ["outputs/t12_year1.xlsx", "outputs/t12_Year 1.xlsx"],
+            ["outputs/t12_year2.xlsx", "outputs/t12_Year 2.xlsx"],
+            ["outputs/t12_year3.xlsx", "outputs/t12_Year 3.xlsx"],
         ]
-        for excel_file in excel_files:
+        for candidate_keys in excel_files:
             try:
-                key = s3_utils.job_key(job_id, excel_file)
+                key = None
+                for candidate in candidate_keys:
+                    candidate_key = s3_utils.job_key(job_id, candidate)
+                    try:
+                        s3.head_object(Bucket=s3_utils.BUCKET, Key=candidate_key)
+                        key = candidate_key
+                        break
+                    except Exception:
+                        continue
+
+                if not key:
+                    raise FileNotFoundError(f"None of these files exist: {candidate_keys}")
+
                 obj = s3.get_object(Bucket=s3_utils.BUCKET, Key=key)
-                filename = excel_file.split("/")[-1]
+                filename = key.split("/")[-1]
                 zf.writestr(filename, obj["Body"].read())
             except Exception as e:
-                logger.warning("Could not add %s to ZIP: %s", excel_file, e)
+                logger.warning("Could not add %s to ZIP: %s", candidate_keys, e)
 
     return buf.getvalue()
 
@@ -508,14 +520,30 @@ def handler(event, context):
     )
 
     # Generate presigned URLs (7 days)
+    t12_candidates = [
+        ["outputs/t12_year1.xlsx", "outputs/t12_Year 1.xlsx"],
+        ["outputs/t12_year2.xlsx", "outputs/t12_Year 2.xlsx"],
+        ["outputs/t12_year3.xlsx", "outputs/t12_Year 3.xlsx"],
+    ]
+
+    s3 = s3_utils.get_s3_client()
+    t12_urls = []
+    for candidates in t12_candidates:
+        resolved = None
+        for candidate in candidates:
+            try:
+                s3.head_object(Bucket=s3_utils.BUCKET, Key=s3_utils.job_key(job_id, candidate))
+                resolved = candidate
+                break
+            except Exception:
+                continue
+        if resolved:
+            t12_urls.append(s3_utils.generate_presigned_url(job_id, resolved))
+
     urls = {
         "appraisal": s3_utils.generate_presigned_url(job_id, "outputs/appraisal_report.docx"),
         "rent_roll": s3_utils.generate_presigned_url(job_id, "outputs/rent_roll.xlsx"),
-        "t12_files": [
-            s3_utils.generate_presigned_url(job_id, "outputs/t12_year1.xlsx"),
-            s3_utils.generate_presigned_url(job_id, "outputs/t12_year2.xlsx"),
-            s3_utils.generate_presigned_url(job_id, "outputs/t12_year3.xlsx"),
-        ],
+        "t12_files": t12_urls,
         "complete_package": s3_utils.generate_presigned_url(job_id, "outputs/loan_package.zip"),
     }
 
