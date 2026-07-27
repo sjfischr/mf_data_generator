@@ -229,7 +229,7 @@ export default function PropertyForm({ onSubmit, onLucky }: Props) {
             id="property_name"
             name="property_name"
             type="text"
-            placeholder="Smaug Court Apartments"
+            placeholder="Copper Peak Apartments"
             value={form.property_name}
             onChange={handleChange}
             className={inputClass('property_name')}
@@ -382,7 +382,7 @@ export default function PropertyForm({ onSubmit, onLucky }: Props) {
             {luckySubmitting ? (
               <>
                 <Spinner />
-                Summoning Smaug...
+                Generating...
               </>
             ) : (
               <>I&apos;m Feeling Lucky</>

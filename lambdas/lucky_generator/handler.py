@@ -42,7 +42,7 @@ def _normalize(payload: dict) -> dict:
         property_type = "garden-style"
 
     return {
-        "property_name": str(payload.get("property_name", "Smaug Residences")).strip(),
+        "property_name": str(payload.get("property_name", "Meridian Residences")).strip(),
         "address": str(payload.get("address", "1000 Ember Lane")).strip(),
         "city": str(payload.get("city", "Austin")).strip(),
         "state": str(payload.get("state", "TX")).strip()[:2].upper(),
@@ -84,7 +84,7 @@ def handler(event, context):
     except Exception as exc:
         logger.exception("Lucky generation failed: %s", exc)
         fallback = {
-            "property_name": "Smaug Court Apartments",
+            "property_name": "Meridian Court Apartments",
             "address": "7429 Copper Peak Drive",
             "city": "Phoenix",
             "state": "AZ",
