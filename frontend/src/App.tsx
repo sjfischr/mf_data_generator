@@ -92,7 +92,7 @@ export default function App() {
           </div>
           <div>
             <h1 className="text-lg font-bold tracking-tight text-slate-900 sm:text-xl">
-              Smaug: The Synthetic Multifamily Appraisal/Underwriting Generator
+              Synthetic Multifamily Appraisal Generator
             </h1>
             <p className="hidden text-xs text-slate-500 sm:block">
               AI-powered multifamily appraisal and underwriting packages
@@ -159,7 +159,7 @@ export default function App() {
       {/* Footer */}
       <footer className="mt-auto border-t border-slate-200 bg-white/60 py-4">
         <p className="text-center text-xs text-slate-400">
-          Smaug &mdash; The Synthetic Multifamily Appraisal/Underwriting Generator &mdash; For demonstration &amp;
+          Synthetic Multifamily Appraisal Generator &mdash; For demonstration &amp;
           development purposes only.
         </p>
       </footer>
