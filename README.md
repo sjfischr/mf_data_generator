@@ -28,7 +28,7 @@ flowchart TD
     QC --> ASM["Document Assembler<br/>Pandoc + python-docx"]
     ASM --> S3[("Amazon S3")]
     S3 -->|presigned URLs| DL["Download Handler<br/>Lambda"]
-    DL -->|GET /api/download/{job_id}| UI
+    DL -->|"GET /api/download/:job_id"| UI
 ```
 
 ### Request lifecycle
