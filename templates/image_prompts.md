@@ -1,102 +1,114 @@
 # Image Generation Prompts
 
-These templates are customized per property using crosswalk data.
-Replace bracketed placeholders with actual property data.
+This document describes how the image generator builds a **consistent** 30-image
+photo package for a property using the Krea 2 Large model on Replicate.
 
-## Exterior Views (6 images)
+Prompts are **not** hand-authored from this file — they are generated at runtime
+in [`lambdas/image_generator/handler.py`](../lambdas/image_generator/handler.py).
+This document is the reference for the shot list and the prompt structure.
 
-1. **aerial_view.jpg**
-   Professional aerial photograph of a [building_type] apartment community with [total_buildings] buildings, [stories] stories each, located in [city], [state]. Landscaped grounds, parking areas visible. Clear sky, daytime. Commercial real estate photography style.
+## Pipeline
 
-2. **front_entrance.jpg**
-   Professional photograph of the main entrance to [property_name], a [building_type] apartment complex. Welcoming leasing office entrance with signage. Well-maintained landscaping, modern design. Daytime, warm lighting.
+1. **Architectural concept (Haiku)** — a single pass establishes one concrete
+   visual identity for the property so all 30 images depict the *same* building.
+   The concept is a JSON object with these keys:
 
-3. **building_exterior_1.jpg**
-   Professional photograph of a [stories]-story [building_type] apartment building exterior. [year_built] construction, well-maintained siding and roofing. Balconies visible. Landscaped walkways. Commercial real estate photography.
+   - `architectural_style` — short style label (e.g. "contemporary garden-style craftsman")
+   - `exterior_materials` — consistent siding/brick/stone/trim materials and colors
+   - `roofline` — consistent roof type/pitch (garden-style) or parapet/roofline (high-rise)
+   - `window_style` — consistent window/balcony style
+   - `color_palette` — 2–4 consistent exterior colors
+   - `landscaping_theme` — consistent plantings, hardscape, terrain
+   - `site_features` — recurring site details (lighting, signage style, walkway paving)
 
-4. **building_exterior_2.jpg**
-   Professional photograph of another angle of a [building_type] apartment building, [stories] stories. Covered parking and breezeway visible. Modern construction from [year_built]. Daytime photography.
+2. **Structured prompts (Sonnet)** — all 30 prompts are generated in a single
+   call, each threaded through the shared concept above, using the exact
+   structure below.
 
-5. **parking_area.jpg**
-   Professional photograph of an apartment community parking area with [parking_spaces] spaces. Well-striped asphalt, covered and uncovered parking. [building_type] apartment buildings in background.
+3. **Rendering (Krea 2 Large)** — each assembled prompt is sent to
+   `krea/krea-2-large` at `creativity: "low"` to minimize drift and keep the
+   package internally consistent.
 
-6. **site_overview.jpg**
-   Wide-angle professional photograph of a [site_area_acres]-acre apartment community. Multiple [stories]-story buildings arranged around courtyards. Mature landscaping, walking paths. [city], [state] setting.
+## Prompt structure
 
-## Amenity Views (6 images)
+Every prompt uses these seven section headers, in this exact order:
 
-7. **pool_area.jpg**
-   Professional photograph of an apartment community swimming pool. Resort-style pool with lounge chairs, umbrellas, and pool deck. Apartment buildings in background. Sunny day.
+```
+Subject: [one line — the primary subject and setting type]
 
-8. **fitness_center.jpg**
-   Professional photograph of a modern apartment fitness center interior. Commercial-grade cardio and weight equipment. Mirrors, rubber flooring, natural light. Clean and well-maintained.
+Architecture details: [comma-separated structural/material features — building materials, window types, rooflines, structural elements]
 
-9. **clubhouse_exterior.jpg**
-   Professional photograph of an apartment community clubhouse exterior. Welcoming entrance, covered patio, modern design. Landscaping and walkways.
+Landscaping: [comma-separated — vegetation, hardscape, terrain, foreground elements]
 
-10. **clubhouse_interior.jpg**
-    Professional photograph of an apartment clubhouse interior. Community lounge area with modern furniture, TV, kitchen area. Open floor plan, natural light.
+Lighting/atmosphere: [comma-separated — time of day, sky condition, light quality, season indicators]
 
-11. **dog_park.jpg**
-    Professional photograph of an apartment community dog park. Fenced area with agility equipment, benches, artificial turf. Apartment buildings visible in background.
+Camera: [comma-separated — angle, height, lens characteristics, composition notes]
 
-12. **business_center.jpg**
-    Professional photograph of an apartment business center. Computer workstations, printer, conference table. Modern office design, good lighting.
+Style tags: [comma-separated — 4-6 short descriptive tags for overall photographic/artistic style]
 
-## Unit Interior Views (12 images)
+Negative prompt suggestions: [comma-separated — 4-6 things to avoid: common generation artifacts, distortions, or unwanted elements specific to this image]
+```
 
-13. **studio_living.jpg**
-    Professional interior photograph of a [avg_size_sf_studio] sq ft studio apartment. Open floor plan, modern finishes, hardwood-style flooring, stainless appliances visible. Natural light from windows.
+### Structuring rules
 
-14. **1br_living.jpg**
-    Professional interior photograph of a [avg_size_sf_1br] sq ft one-bedroom apartment living room. Modern furnishings, open to kitchen, large windows. Contemporary design.
+- Reuse the **same** architectural materials, colors, rooflines, and landscaping
+  theme from the shared concept in every prompt.
+- Never transcribe legible text, signage, logos, or heraldry — describe them
+  generically (e.g. "carved wooden sign", not the words on it).
+- Do not identify or name real people — describe figures only by pose, clothing,
+  and position.
+- Do not guess at real-world proper nouns; describe building types generically.
+- Keep every section to visual, physically observable detail only.
+- Every section must be present, even if brief.
 
-15. **1br_kitchen.jpg**
-    Professional interior photograph of a one-bedroom apartment kitchen. Granite countertops, stainless steel appliances, white cabinetry, pendant lighting. Modern finishes.
+> **Note on negative prompts:** Krea 2 Large has no separate `negative_prompt`
+> API field. The "Negative prompt suggestions" section is kept inline as part of
+> the single assembled prompt string.
 
-16. **1br_bedroom.jpg**
-    Professional interior photograph of a one-bedroom apartment bedroom. Spacious room with large window, walk-in closet visible. Neutral colors, modern design.
+## Shot list (30 images)
 
-17. **2br_living.jpg**
-    Professional interior photograph of a [avg_size_sf_2br] sq ft two-bedroom apartment living room. Spacious open concept, dining area, large windows. Modern decor.
+Each shot below is generated as its own structured prompt. The generator returns
+one object per shot with `filename`, `description`, the seven structured section
+fields, and an assembled `prompt` string.
 
-18. **2br_kitchen.jpg**
-    Professional interior photograph of a two-bedroom apartment kitchen. Island with seating, stainless appliances, modern cabinetry. Generous counter space.
+### Exterior Views (6 images)
 
-19. **2br_master_bedroom.jpg**
-    Professional interior photograph of a two-bedroom apartment master bedroom. En-suite bathroom entrance visible, walk-in closet. Modern finishes.
+1. **aerial_view.jpg** — Aerial view of the community: buildings, landscaped grounds, parking areas.
+2. **front_entrance.jpg** — Main entrance and leasing office with generic signage and landscaping.
+3. **building_exterior_1.jpg** — Building exterior showing siding, roofing, balconies, walkways.
+4. **building_exterior_2.jpg** — Alternate building angle showing covered parking and breezeway.
+5. **parking_area.jpg** — Parking area with striped asphalt and covered/uncovered spaces.
+6. **site_overview.jpg** — Wide-angle overview of multiple buildings around courtyards.
 
-20. **2br_bathroom.jpg**
-    Professional interior photograph of a modern apartment bathroom. Double vanity, tiled shower, large mirror. Clean, contemporary design.
+### Amenity Views (6 images)
 
-21. **3br_living.jpg**
-    Professional interior photograph of a spacious [avg_size_sf_3br] sq ft three-bedroom apartment living room. Open floor plan, dining area, premium finishes.
+7. **pool_area.jpg** — Resort-style swimming pool with lounge chairs and deck.
+8. **fitness_center.jpg** — Modern fitness center with cardio and weight equipment.
+9. **clubhouse_exterior.jpg** — Clubhouse exterior with covered patio and landscaping.
+10. **clubhouse_interior.jpg** — Clubhouse lounge with modern furniture and kitchen area.
+11. **dog_park.jpg** — Fenced dog park with agility equipment and benches.
+12. **business_center.jpg** — Business center with workstations and conference table.
 
-22. **3br_kitchen.jpg**
-    Professional interior photograph of a three-bedroom apartment kitchen. Large island, premium appliances, abundant storage. High-end finishes.
+### Unit Interior Views (12 images)
 
-23. **3br_master_suite.jpg**
-    Professional interior photograph of a three-bedroom apartment master suite. Large bedroom with sitting area, en-suite bath, walk-in closet. Premium finishes.
+13. **studio_living.jpg** — Studio apartment, open floor plan, modern finishes.
+14. **1br_living.jpg** — One-bedroom living room, open to kitchen, large windows.
+15. **1br_kitchen.jpg** — One-bedroom kitchen with stone counters and stainless appliances.
+16. **1br_bedroom.jpg** — One-bedroom bedroom with large window and closet.
+17. **2br_living.jpg** — Two-bedroom living room, open concept with dining area.
+18. **2br_kitchen.jpg** — Two-bedroom kitchen with island and modern cabinetry.
+19. **2br_master_bedroom.jpg** — Two-bedroom master bedroom with en-suite entrance.
+20. **2br_bathroom.jpg** — Modern bathroom with double vanity and tiled shower.
+21. **3br_living.jpg** — Spacious three-bedroom living room with premium finishes.
+22. **3br_kitchen.jpg** — Three-bedroom kitchen with large island and premium appliances.
+23. **3br_master_suite.jpg** — Three-bedroom master suite with sitting area and en-suite.
+24. **3br_secondary_bedroom.jpg** — Secondary bedroom with closet and natural light.
 
-24. **3br_secondary_bedroom.jpg**
-    Professional interior photograph of a secondary bedroom in a three-bedroom apartment. Good-sized room with closet, natural light. Neutral decor.
+### Site and Surroundings (6 images)
 
-## Site and Surroundings (6 images)
-
-25. **street_view.jpg**
-    Professional photograph from the street looking at the [property_name] apartment community entrance. Street-level view showing access, signage, and surrounding area in [city], [state].
-
-26. **landscaping_detail.jpg**
-    Professional photograph of apartment community landscaping. Mature trees, maintained flower beds, irrigation system. Walking paths between buildings.
-
-27. **courtyard.jpg**
-    Professional photograph of an interior courtyard in a [building_type] apartment community. Seating areas, landscaping, walkways connecting buildings.
-
-28. **mail_area.jpg**
-    Professional photograph of an apartment community mailbox area. Centralized mail kiosk with package lockers. Covered structure, well-lit.
-
-29. **laundry_facility.jpg**
-    Professional photograph of an apartment community laundry facility. Commercial washers and dryers, folding tables, clean and well-lit space.
-
-30. **maintenance_building.jpg**
-    Professional photograph of apartment community maintenance and storage area. Well-organized, clean exterior. Professional property management appearance.
+25. **street_view.jpg** — Street-level view of the community entrance and access.
+26. **landscaping_detail.jpg** — Landscaping detail: mature trees, flower beds, walking paths.
+27. **courtyard.jpg** — Interior courtyard with seating and walkways between buildings.
+28. **mail_area.jpg** — Centralized mail kiosk with package lockers, covered and well-lit.
+29. **laundry_facility.jpg** — Community laundry facility with commercial machines and folding tables.
+30. **maintenance_building.jpg** — Maintenance and storage area, clean and well-organized.

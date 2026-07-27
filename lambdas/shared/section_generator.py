@@ -24,8 +24,8 @@ REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 MODELS = {
     "haiku": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "sonnet": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "opus": "us.anthropic.claude-opus-4-6-v1",
+    "sonnet": os.environ.get("BEDROCK_SONNET_MODEL_ARN", ""),
+    "opus": os.environ.get("BEDROCK_OPUS_MODEL_ARN", ""),
 }
 
 

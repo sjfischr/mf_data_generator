@@ -33,10 +33,24 @@ class LambdaStack(Stack):
                 "REPLICATE_API_TOKEN environment variable is required for ImageGenerator deployment"
             )
 
+        sonnet_model_arn = os.environ.get("BEDROCK_SONNET_MODEL_ARN", "").strip()
+        if not sonnet_model_arn:
+            raise ValueError(
+                "BEDROCK_SONNET_MODEL_ARN environment variable is required for deployment"
+            )
+
+        opus_model_arn = os.environ.get("BEDROCK_OPUS_MODEL_ARN", "").strip()
+        if not opus_model_arn:
+            raise ValueError(
+                "BEDROCK_OPUS_MODEL_ARN environment variable is required for deployment"
+            )
+
         # Shared environment variables for all Lambdas
         self.shared_env = {
             "S3_BUCKET": bucket.bucket_name,
             "SNS_TOPIC_ARN": topic.topic_arn,
+            "BEDROCK_SONNET_MODEL_ARN": sonnet_model_arn,
+            "BEDROCK_OPUS_MODEL_ARN": opus_model_arn,
         }
 
         # Bedrock invoke policy (includes Marketplace + inference profile permissions)
@@ -95,8 +109,8 @@ class LambdaStack(Stack):
         self.image_generator = self._create_lambda(
             "ImageGenerator",
             handler_path="lambdas/image_generator",
-            memory_size=512,
-            timeout_minutes=5,
+            memory_size=1024,
+            timeout_minutes=10,
             extra_env={"REPLICATE_API_TOKEN": replicate_api_token},
         )
 

@@ -105,19 +105,6 @@ export default function App() {
       <main className="mx-auto max-w-4xl px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
         {state.view === 'form' && (
           <div className="fade-in space-y-6">
-            <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-              <img
-                src="/smaug-hero.jpg"
-                alt="Smaug-inspired dragon mascot overlooking a multifamily tower"
-                className="h-56 w-full object-cover sm:h-72"
-              />
-              <div className="px-4 py-3 sm:px-6">
-                <p className="text-sm text-slate-600">
-                  Meet Smaug: your AI co-pilot for synthetic multifamily
-                  appraisal and underwriting packages.
-                </p>
-              </div>
-            </div>
             <PropertyForm onSubmit={handleSubmit} onLucky={handleLucky} />
           </div>
         )}
