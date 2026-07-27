@@ -18,6 +18,8 @@ permissions:
 env:
   AWS_REGION: us-east-1
   REPLICATE_API_TOKEN: ${{ secrets.REPLICATE_API_TOKEN }}
+  BEDROCK_SONNET_MODEL_ARN: ${{ secrets.BEDROCK_SONNET_MODEL_ARN }}
+  BEDROCK_OPUS_MODEL_ARN: ${{ secrets.BEDROCK_OPUS_MODEL_ARN }}
 
 jobs:
   deploy:
@@ -33,10 +35,10 @@ jobs:
           python-version: '3.11'
           cache: pip
 
-      - name: Set up Node 18
+      - name: Set up Node 22
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '22'
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt

@@ -136,7 +136,7 @@ See [templates/image_prompts.md](templates/image_prompts.md) for the shot list a
 ### Prerequisites
 
 - Python 3.11+
-- Node.js 18+
+- Node.js 22+ (Node 18 reached end-of-life in April 2025)
 - AWS CLI configured with appropriate credentials
 - AWS CDK CLI (`npm install -g aws-cdk`)
 - Pandoc installed
@@ -248,6 +248,19 @@ Using **cross-region inference profile ARNs** (rather than single-region model I
 | Variable | Description |
 |----------|-------------|
 | `VITE_API_URL` | Base URL of the deployed API Gateway stage |
+
+### GitHub Actions secrets
+
+The `deploy-backend.yml` and `deploy-frontend.yml` workflows read these from **repo secrets** (Settings → Secrets and variables → Actions):
+
+| Secret | Used by | Description |
+|--------|---------|--------------|
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | backend | AWS credentials for `cdk deploy` |
+| `REPLICATE_API_TOKEN` | backend | Replicate API key |
+| `BEDROCK_SONNET_MODEL_ARN` | backend | Bedrock inference-profile ARN for Sonnet — **required**, CDK synth fails without it |
+| `BEDROCK_OPUS_MODEL_ARN` | backend | Bedrock inference-profile ARN for Opus — **required**, CDK synth fails without it |
+| `VITE_API_URL` | frontend | API Gateway base URL baked into the frontend build |
+| `VERCEL_TOKEN` / `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID` | frontend | Vercel deployment credentials |
 
 ---
 
