@@ -1,28 +1,36 @@
-"""Shared error types for transient pipeline stages."""
+﻿"""Shared error types for transient pipeline stages."""
 
 from __future__ import annotations
+
+TRANSIENT_CODES = {
+    "ThrottlingException",
+    "ServiceUnavailableException",
+    "ModelNotReadyException",
+    "InternalServerException",
+    "TooManyRequestsException",
+    "ModelTimeoutException",
+}
 
 
 class TransientError(RuntimeError):
     """An operation failed because of a recoverable external-service error."""
 
 
+def is_transient(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        code = str(response.get("Error", {}).get("Code", ""))
+        if code in TRANSIENT_CODES:
+            return True
+        status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if status == 429 or (isinstance(status, int) and status >= 500):
+            return True
+    status = getattr(exc, "status_code", None) or getattr(response, "status_code", None)
+    if status == 429 or (isinstance(status, int) and 500 <= status < 600):
+        return True
+    return "throttl" in str(exc).lower()
+
+
 def wrap_transient(exc: Exception) -> Exception:
-    code = ""
-    if hasattr(exc, "response"):
-        code = str(exc.response.get("Error", {}).get("Code", ""))
-    text = str(exc)
-    if (
-        code in {
-            "ThrottlingException",
-            "ServiceUnavailableException",
-            "ModelNotReadyException",
-            "InternalServerException",
-            "TooManyRequestsException",
-        }
-        or "429" in text
-        or " 5" in text
-        or "throttl" in text.lower()
-    ):
-        return TransientError(text)
-    return exc
+    """Return a TransientError for recoverable failures, otherwise the original exception."""
+    return TransientError(str(exc)) if is_transient(exc) else exc

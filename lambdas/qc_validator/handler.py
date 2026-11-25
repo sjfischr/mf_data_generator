@@ -7,7 +7,6 @@ import io
 
 from openpyxl import load_workbook
 from docx import Document
-from lambdas.shared.chart_of_accounts import CHART_OF_ACCOUNTS
 
 from lambdas.shared import s3_utils
 from lambdas.shared.models import CrosswalkData
@@ -144,165 +143,160 @@ def run_section_content_checks(crosswalk: CrosswalkData, job_id: str) -> list[di
     return issues
 
 
-def run_new_deliverable_checks(crosswalk: CrosswalkData, job_id: str) -> list[dict]:
-    issues = []
+NARRATIVE_HEADINGS = [
+    "1. Loan Summary & Salient Facts",
+    "2. Executive Summary & Recommendation",
+    "3. Sources & Uses",
+    "4. Borrower, Key Principals & Guarantor",
+    "5. Property Management",
+    "6. Property Description",
+    "7. Market & Submarket Analysis",
+    "8. Rent Roll & Occupancy Analysis",
+    "9. Historical Operating Performance vs. Underwriting",
+    "10. Underwritten NCF & Loan Sizing",
+    "11. Appraisal Review",
+    "12. Third-Party Reports",
+    "13. Refinance Risk Analysis",
+    "14. Strengths, Risks & Mitigants",
+    "15. Waivers & Exceptions",
+    "16. Conditions of Approval",
+    "17. Underwriter Conclusion & Approval",
+]
+
+
+class CheckLog:
+    """Collects issues and counts every individual check performed."""
+
+    def __init__(self):
+        self.count = 0
+        self.issues: list[dict] = []
+
+    def check(self, passed: bool, severity: str, category: str, description: str, location: str) -> None:
+        self.count += 1
+        if not passed:
+            self.issues.append({
+                "severity": severity,
+                "category": category,
+                "description": description,
+                "location": location,
+            })
+
+
+def _read_object(job_id: str, path: str) -> bytes:
     s3 = s3_utils.get_s3_client()
+    return s3.get_object(Bucket=s3_utils.BUCKET, Key=s3_utils.job_key(job_id, path))["Body"].read()
 
-    if crosswalk.financing is not None:
-        financing = crosswalk.financing
-        if financing.underwritten_dscr + 1e-9 < financing.tier_minimum_dscr:
-            issues.append({
-                "severity": "error",
-                "category": "tier_dscr_mismatch",
-                "description": (
-                    f"Underwritten DSCR {financing.underwritten_dscr:.2f}x "
-                    f"below tier minimum {financing.tier_minimum_dscr:.2f}x"
-                ),
-                "location": "crosswalk-data.json",
-            })
-        if financing.ltv_underwriting_value > financing.tier_maximum_ltv:
-            issues.append({
-                "severity": "error",
-                "category": "tier_ltv_mismatch",
-                "description": (
-                    f"LTV {financing.ltv_underwriting_value:.2f}% "
-                    f"above tier maximum {financing.tier_maximum_ltv:.2f}%"
-                ),
-                "location": "crosswalk-data.json",
-            })
 
-    narrative_key = s3_utils.job_key(job_id, "outputs/lender_narrative.docx")
+def check_financing(crosswalk: CrosswalkData, log: CheckLog) -> None:
+    financing = crosswalk.financing
+    if financing is None:
+        return
+    log.check(financing.underwritten_dscr + 1e-9 >= financing.tier_minimum_dscr, "error", "tier_dscr",
+              f"Underwritten DSCR {financing.underwritten_dscr:.2f}x below tier minimum "
+              f"{financing.tier_minimum_dscr:.2f}x", "crosswalk-data.json")
+    log.check(financing.ltv_underwriting_value <= financing.tier_maximum_ltv + 1e-9, "error", "tier_ltv",
+              f"LTV {financing.ltv_underwriting_value:.2f}% above tier maximum "
+              f"{financing.tier_maximum_ltv:.2f}%", "crosswalk-data.json")
+
+
+def narrative_text(doc) -> str:
+    parts = [p.text for p in doc.paragraphs]
+    for table in doc.tables:
+        parts.extend(cell.text for row in table.rows for cell in row.cells)
+    return "\n".join(parts)
+
+
+def check_narrative(crosswalk: CrosswalkData, job_id: str, log: CheckLog) -> None:
+    location = "lender_narrative.docx"
     try:
-        response = s3.get_object(Bucket=s3_utils.BUCKET, Key=narrative_key)
-        doc = Document(io.BytesIO(response["Body"].read()))
-        headings = [
-            paragraph.text.strip()
-            for paragraph in doc.paragraphs
-            if paragraph.style.name.startswith("Heading")
-        ]
-        required = [
-            "1. Loan Summary & Salient Facts",
-            "2. Executive Summary & Recommendation",
-            "3. Sources & Uses",
-            "4. Borrower, Key Principals & Guarantor",
-            "5. Property Management",
-            "6. Property Description",
-            "7. Market & Submarket Analysis",
-            "8. Rent Roll & Occupancy Analysis",
-            "9. Historical Operating Performance vs. Underwriting",
-            "10. Underwritten NCF & Loan Sizing",
-            "11. Appraisal Review",
-            "12. Third-Party Reports",
-            "13. Refinance Risk Analysis",
-            "14. Strengths, Risks & Mitigants",
-            "15. Waivers & Exceptions",
-            "16. Conditions of Approval",
-            "17. Underwriter Conclusion & Approval",
-        ]
-        for heading in required:
-            if heading not in headings:
-                issues.append({
-                    "severity": "error",
-                    "category": "missing_narrative_heading",
-                    "description": f"Narrative missing heading: {heading}",
-                    "location": "lender_narrative.docx",
-                })
+        doc = Document(io.BytesIO(_read_object(job_id, "outputs/lender_narrative.docx")))
     except Exception as exc:
-        issues.append({
-            "severity": "error",
-            "category": "missing_narrative",
-            "description": f"Cannot read lender narrative: {exc}",
-            "location": "lender_narrative.docx",
-        })
+        log.check(False, "error", "missing_narrative", f"Cannot read lender narrative: {exc}", location)
+        return
+    log.check(True, "error", "missing_narrative", "", location)
 
-    if crosswalk.financing is not None:
-        loan_amount = crosswalk.financing.loan_amount
-        try:
-            response = s3.get_object(Bucket=s3_utils.BUCKET, Key=narrative_key)
-            doc = Document(io.BytesIO(response["Body"].read()))
-            text = "\n".join(
-                paragraph.text for paragraph in doc.paragraphs
-            )
-            for table in doc.tables:
-                text += "\n" + "\n".join(
-                    cell.text
-                    for row in table.rows
-                    for cell in row.cells
-                )
-            formatted = f"${loan_amount:,}"
-            if formatted not in text:
-                issues.append({
-                    "severity": "error",
-                    "category": "missing_narrative_loan_amount",
-                    "description": f"Lender narrative missing loan amount {formatted}",
-                    "location": "lender_narrative.docx",
-                })
-        except Exception:
-            pass
+    headings = [p.text.strip() for p in doc.paragraphs if p.style.name.startswith("Heading")]
+    positions = []
+    for heading in NARRATIVE_HEADINGS:
+        present = heading in headings
+        log.check(present, "error", "missing_narrative_heading", f"Narrative missing heading: {heading}", location)
+        if present:
+            positions.append(headings.index(heading))
+    log.check(positions == sorted(positions), "error", "narrative_heading_order",
+              "Narrative headings are out of order", location)
 
+    financing = crosswalk.financing
+    if financing is None or crosswalk.operating_history is None:
+        return
+    text = narrative_text(doc)
+    figures = [
+        ("error", f"${financing.loan_amount:,}", "loan amount"),
+        ("warning", f"{financing.underwritten_dscr:.2f}x", "Underwritten DSCR"),
+        ("warning", f"{financing.ltv_underwriting_value:.2f}%", "LTV"),
+        ("warning", f"${crosswalk.operating_history.underwritten.ncf:,}", "Underwritten NCF"),
+    ]
+    for severity, formatted, label in figures:
+        log.check(formatted in text, severity, "narrative_missing_figure",
+                  f"Lender narrative missing {label} {formatted}", location)
+
+    try:
+        warnings = json.loads(_read_object(job_id, "sections/lender_narrative_warnings.json")).get("warnings", [])
+    except Exception:
+        warnings = []
+    for warning in warnings:
+        log.check(False, "warning", "narrative_number_guard", warning, location)
+
+
+def check_t12_workbooks(crosswalk: CrosswalkData, job_id: str, log: CheckLog) -> None:
+    if crosswalk.operating_history is None:
+        return
     for year_number in (1, 2, 3):
-        key = s3_utils.job_key(job_id, f"outputs/t12_year{year_number}.xlsx")
+        location = f"t12_year{year_number}.xlsx"
         try:
-            response = s3.get_object(Bucket=s3_utils.BUCKET, Key=key)
-            wb = load_workbook(io.BytesIO(response["Body"].read()), data_only=False)
+            wb = load_workbook(io.BytesIO(_read_object(job_id, f"outputs/{location}")), data_only=False)
             ws = wb.active
-            if ws is None:
-                raise RuntimeError("No worksheet")
-
-            if crosswalk.operating_history is not None:
-                column_name = f"year_{year_number}"
-                expected = getattr(crosswalk.operating_history, column_name)
-
-                account_totals = {}
-                account_map = {
-                    str(account[0]): account[2]
-                    for account in CHART_OF_ACCOUNTS
-                }
-                for row in range(5, ws.max_row + 1):
-                    label = str(ws.cell(row, 1).value or "")
-                    account_number = label.split(" ", 1)[0]
-                    category = account_map.get(account_number)
-                    if not category:
-                        continue
-                    monthly_total = sum(
-                        int(ws.cell(row, col).value or 0)
-                        for col in range(2, 14)
-                        if isinstance(ws.cell(row, col).value, (int, float))
-                    )
-                    account_totals[category] = (
-                        account_totals.get(category, 0) + monthly_total
-                    )
-
-                actual_egi = (
-                    account_totals.get("gpr", 0)
-                    + account_totals.get("loss_gain_to_lease", 0)
-                    - account_totals.get("vacancy", 0)
-                    - account_totals.get("concessions", 0)
-                    - account_totals.get("bad_debt", 0)
-                    - account_totals.get("non_revenue_units", 0)
-                    + account_totals.get("laundry_vending", 0)
-                    + account_totals.get("parking", 0)
-                    + account_totals.get("commercial", 0)
-                    + account_totals.get("other_income", 0)
-                )
-                if actual_egi != expected.effective_gross_income:
-                    issues.append({
-                        "severity": "error",
-                        "category": "t12_total_mismatch",
-                        "description": (
-                            f"t12_year{year_number}.xlsx EGI {actual_egi:,} "
-                            f"!= crosswalk EGI {expected.effective_gross_income:,}"
-                        ),
-                        "location": f"t12_year{year_number}.xlsx",
-                    })
         except Exception as exc:
-            issues.append({
-                "severity": "error",
-                "category": "missing_t12",
-                "description": f"Cannot read t12_year{year_number}.xlsx: {exc}",
-                "location": f"t12_year{year_number}.xlsx",
-            })
-    return issues
+            log.check(False, "error", "missing_t12", f"Cannot read {location}: {exc}", location)
+            continue
+        log.check(True, "error", "missing_t12", "", location)
+
+        totals = {"4": 0, "5": 0, "6": 0}
+        detail_count = 0
+        for row in range(5, ws.max_row + 1):
+            label = str(ws.cell(row, 1).value or "")
+            prefix = label[:1]
+            if not (label[:4].isdigit() and prefix in totals):
+                continue
+            detail_count += 1
+            totals[prefix] += sum(
+                ws.cell(row, col).value for col in range(2, 14)
+                if isinstance(ws.cell(row, col).value, (int, float))
+            )
+        expected = getattr(crosswalk.operating_history, f"year_{year_number}")
+        egi, opex, reserves = totals["4"], totals["5"], totals["6"]
+        comparisons = [
+            ("EGI", egi, expected.effective_gross_income),
+            ("Total Operating Expenses", opex, expected.total_operating_expenses),
+            ("NOI", egi - opex, expected.noi),
+            ("NCF", egi - opex - reserves, expected.ncf),
+        ]
+        for label, actual, target in comparisons:
+            log.check(actual == target, "error", "t12_total_mismatch",
+                      f"{location} {label} {actual:,} != crosswalk {target:,}", location)
+        log.check(detail_count >= 40, "warning", "t12_detail",
+                  f"{location} has only {detail_count} detail accounts", location)
+
+
+def check_images(job_id: str, log: CheckLog) -> None:
+    try:
+        manifest = json.loads(_read_object(job_id, "images/manifest.json"))
+    except Exception:
+        log.check(False, "warning", "missing_images", "Image manifest not found", "images/manifest.json")
+        return
+    for entry in manifest:
+        log.check(entry.get("status") == "success", "warning", "image_failed",
+                  f"Image {entry.get('filename')} failed: {entry.get('reason') or entry.get('error')}",
+                  "images/manifest.json")
 
 
 def handler(event, context):
@@ -315,22 +309,24 @@ def handler(event, context):
 
     all_issues = []
 
-    # Structural checks
+    # Structural checks (4) and section content checks
     structural = run_structural_checks(crosswalk)
     all_issues.extend(structural)
-
-    # Content checks
     content_issues = run_section_content_checks(crosswalk, job_id)
     all_issues.extend(content_issues)
+    section_count = len([k for k in s3_utils.list_files(job_id, "sections/") if k.endswith(".md")])
+    legacy_checks = 4 + section_count + 4
 
-    # New deliverable checks
-    deliverable_issues = run_new_deliverable_checks(crosswalk, job_id)
-    all_issues.extend(deliverable_issues)
+    log = CheckLog()
+    check_financing(crosswalk, log)
+    check_narrative(crosswalk, job_id, log)
+    check_t12_workbooks(crosswalk, job_id, log)
+    check_images(job_id, log)
+    all_issues.extend(log.issues)
 
-    # Determine pass/fail
     errors = [i for i in all_issues if i["severity"] == "error"]
     warnings = [i for i in all_issues if i["severity"] == "warning"]
-    total_checks = 50 + len(all_issues) + 17 + 3
+    total_checks = legacy_checks + log.count
     checks_passed = total_checks - len(all_issues)
 
     status = "fail" if errors else "pass"

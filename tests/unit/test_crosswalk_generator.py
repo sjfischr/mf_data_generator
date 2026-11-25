@@ -152,45 +152,49 @@ class TestCrosswalkGenerator:
         )
         assert bedrock_client.invoke_model_json("prompt") == {"status": "ok"}
 
-    def test_normalize_draft_aliases(self):
-        from lambdas.crosswalk_generator.handler import _normalize_draft_data
+    def test_repair_and_finalize_messy_draft(self, finalized_crosswalk):
+        cw = finalized_crosswalk
+        assert cw.property_physical.total_units == 200
+        assert sum(u.count for u in cw.property_physical.unit_mix) == 200
+        assert cw.financial_data.effective_date == "2026-11-15"
+        sale = cw.market_data.comparable_sales[0]
+        assert sale.price_per_unit == round(sale.sale_price / sale.units)
+        assert cw.validate_cap_rate() and cw.validate_value_per_unit() and cw.validate_occupancy_units()
+        year_1 = cw.operating_history.year_1
+        assert year_1.gpr == 4_100_000 and year_1.vacancy == 205_000
+        assert cw.financial_data.historical_t12["Year 1"].net_operating_income == year_1.noi
+        assert (year_1.period_start, year_1.period_end) == ("2025-11-01", "2026-10-31")
+        assert cw.operating_history.year_3.period_start == "2023-11-01"
+        fin = cw.financing
+        assert fin.tier == "Tier 2" and fin.loan_purpose == "Acquisition"
+        assert fin.underwritten_dscr >= fin.tier_minimum_dscr
+        assert fin.ltv_underwriting_value <= fin.tier_maximum_ltv
+        su = fin.sources_uses
+        assert sum(l.amount for l in su.sources) == sum(l.amount for l in su.uses)
+        assert sum(p.net_worth for p in cw.sponsorship.key_principals) >= fin.loan_amount
+        assert cw.third_party_reports.appraisal.value == cw.valuation.final_value_conclusion.market_value
+        assert cw.third_party_reports.environmental_site_assessment.firm
 
-        payload = {
-            "market_data": {
-                "comparable_sales": [
-                    {"sale_price": 100, "units": 3, "price_per_unit": 999},
-                ]
-            },
-            "sponsorship": {
-                "key_principals": [{
-                    "name": "Test",
-                    "title": "Managing Partner",
-                    "experience_years": 12,
-                }],
-                "property_management": {
-                    "company_name": "Test Management",
-                    "fee_percent": 4.5,
-                },
-            },
-            "third_party_reports": {
-                "appraisal": {
-                    "appraiser_name": "Test Appraiser",
-                    "appraisal_date": "2026-01-10",
-                    "appraisal_value": 1000000,
-                },
-                "property_condition": {
-                    "inspector": "Test PCA",
-                    "inspection_date": "2026-01-10",
-                    "deferred_maintenance": 50000,
-                },
-                "environmental": {"findings": "No recognized conditions"},
-                "seismic": {"retrofit_required": False},
-                "zoning": {"zoning_classification": "Conforming"},
-            },
-            "financing_inputs": {"tier": "Tier 1"},
-        }
-        normalized = _normalize_draft_data(payload)
-        assert normalized["market_data"]["comparable_sales"][0]["price_per_unit"] == 33
-        assert normalized["sponsorship"]["key_principals"][0]["role"] == "Managing Partner"
-        assert normalized["third_party_reports"]["appraisal"]["firm"] == "Test Appraiser"
-        assert normalized["financing_inputs"]["tier"] == "Tier 2"
+    def test_generate_crosswalk_uses_model_draft(self, mocker, llm_draft):
+        from lambdas.crosswalk_generator.handler import generate_crosswalk
+
+        mocker.patch("lambdas.shared.bedrock_client.invoke_model_json", return_value=llm_draft)
+        cw = generate_crosswalk(dict(sample_input_dict()), "job-1")
+        assert cw.job_id == "job-1"
+        assert cw.financing.loan_amount > 0
+
+    def test_handler_fails_after_two_bad_drafts(self, mocker):
+        from lambdas.crosswalk_generator import handler as cw_handler
+
+        mocker.patch("lambdas.shared.s3_utils.read_json", return_value=sample_input_dict())
+        invoke = mocker.patch("lambdas.shared.bedrock_client.invoke_model_json", side_effect=ValueError("bad json"))
+        with pytest.raises(cw_handler.CrosswalkGenerationError):
+            cw_handler.handler({"job_id": "job-1"}, None)
+        assert invoke.call_count == 2
+
+
+def sample_input_dict():
+    return {
+        "address": "1234 Main Street", "city": "Denver", "state": "CO",
+        "units": 200, "year_built": 2018, "property_type": "garden-style",
+    }

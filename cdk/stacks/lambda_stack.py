@@ -125,6 +125,7 @@ class LambdaStack(Stack):
             handler_path="lambdas/qc_validator",
             memory_size=512,
             timeout_minutes=5,
+            bundle_requirements=True,
         )
 
         self.assembler = self._create_lambda(

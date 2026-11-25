@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import random
 import calendar
-from datetime import date
+from datetime import date, timedelta
 
 from lambdas.shared.models import (
     CrosswalkDraft,
@@ -211,88 +211,119 @@ def derive_prior_years(
         result.non_revenue_units = round(result.non_revenue_units * income_factor)
         return result
 
-    year_2 = derive(year_1, 0.985, 0.97)
-    year_3 = derive(year_2, 0.985, 0.97)
+    year_2 = derive(year_1, 0.97, 0.965)
+    year_3 = derive(year_2, 0.97, 0.965)
     return year_2, year_3
 
 
 def balance_sources_uses(
     loan_amount: int,
+    loan_purpose: str,
     purchase_price: int,
+    existing_debt_payoff: int,
     closing_costs: int,
-    reserves: int,
-    initial_cash_equity: int,
+    initial_reserve_deposit: int,
+    immediate_repairs: int,
 ) -> SourcesUses:
-    uses = [
-        SourcesUsesLine(label="Purchase Price", amount=purchase_price),
+    """Build a balanced sources-and-uses schedule; borrower cash balances it."""
+    if loan_purpose.lower().startswith("refi"):
+        uses = [SourcesUsesLine(label="Existing Debt Payoff", amount=existing_debt_payoff)]
+    else:
+        uses = [SourcesUsesLine(label="Purchase Price", amount=purchase_price)]
+    uses += [
         SourcesUsesLine(label="Closing Costs", amount=closing_costs),
-        SourcesUsesLine(label="Initial Replacement Reserve", amount=reserves),
+        SourcesUsesLine(label="Initial Replacement Reserve Deposit", amount=initial_reserve_deposit),
+        SourcesUsesLine(label="Completion / Repair Escrow", amount=immediate_repairs),
     ]
     total_uses = sum(line.amount for line in uses)
-    cash_to_borrower = max(0, loan_amount + initial_cash_equity - total_uses)
-    if cash_to_borrower:
-        uses.append(SourcesUsesLine(label="Cash to Borrower", amount=cash_to_borrower))
+    sources = [SourcesUsesLine(label="DUS Loan", amount=loan_amount)]
+    if loan_amount >= total_uses:
+        uses.append(SourcesUsesLine(label="Cash to Borrower", amount=loan_amount - total_uses))
     else:
-        uses.append(SourcesUsesLine(label="Borrower Cash Required", amount=max(0, total_uses - loan_amount)))
-
-    sources = [
-        SourcesUsesLine(label="DUS Loan", amount=loan_amount),
-        SourcesUsesLine(label="Borrower Cash", amount=max(0, initial_cash_equity)),
-    ]
+        sources.append(SourcesUsesLine(label="Borrower Equity", amount=total_uses - loan_amount))
     return SourcesUses(sources=sources, uses=uses)
+
+
+def _pct_split(total: int, weights: list[float]) -> list[int]:
+    raw = [total * w for w in weights]
+    values = [int(v) for v in raw]
+    values[-1] += total - sum(values)
+    return values
+
+
+def derive_year1_from_pro_forma(draft: CrosswalkDraft) -> OperatingColumn:
+    """Build a detailed trailing Year 1 operating column from the appraiser pro forma.
+
+    Actuals run slightly below the stabilized pro forma so Year 1 EGI lands
+    within the +/-10% band the crosswalk spec expects.
+    """
+    income = draft.financial_data.pro_forma_income
+    expenses = draft.financial_data.pro_forma_expenses
+    units = draft.property_physical.total_units
+
+    gpr = round(income.potential_gross_rental_income * 0.985)
+    economic_loss = round(income.vacancy_collection_loss_amount * 0.95)
+    vacancy, concessions, bad_debt = _pct_split(economic_loss, [0.75, 0.15, 0.10])
+    laundry, parking, other = _pct_split(round(income.other_income * 0.97), [0.30, 0.35, 0.35])
+    utilities, water_sewer = _pct_split(round(expenses.utilities * 0.97), [0.65, 0.35])
+    g_and_a, professional = _pct_split(round(expenses.administrative * 0.97), [0.80, 0.20])
+
+    column = OperatingColumn(
+        gpr=gpr,
+        loss_gain_to_lease=-round(gpr * 0.01),
+        vacancy=vacancy,
+        concessions=concessions,
+        bad_debt=bad_debt,
+        non_revenue_units=round(gpr / units) if units >= 50 else 0,
+        laundry_vending=laundry,
+        parking=parking,
+        commercial=0,
+        other_income=other,
+        real_estate_taxes=round(expenses.real_estate_taxes * 0.97),
+        insurance=round(expenses.insurance * 0.97),
+        utilities=utilities,
+        water_sewer=water_sewer,
+        repairs_maintenance=round(expenses.repairs_maintenance * 0.97),
+        payroll_benefits=round(expenses.payroll * 0.97),
+        general_administrative=g_and_a,
+        marketing=round(expenses.marketing * 0.97),
+        professional_fees=professional,
+        management_fee=round(expenses.management_fee_amount * 0.97),
+        ground_rent=0,
+        other_expenses=0,
+        replacement_reserves=max(expenses.replacement_reserves, 250 * units),
+    )
+    column.other_expenses = round(column.effective_gross_income * 0.005)
+    return column
+
+
+def _period_bounds(period_end: date) -> tuple[date, date]:
+    start_year = period_end.year - 1
+    start_month = period_end.month + 1
+    if start_month == 13:
+        start_year += 1
+        start_month = 1
+    return date(start_year, start_month, 1), period_end
+
+
+def _assign_periods(effective_date: str, columns: list[OperatingColumn]) -> None:
+    effective = date.fromisoformat(effective_date)
+    end = effective.replace(day=1) - timedelta(days=1)
+    for column in columns:
+        start, finish = _period_bounds(end)
+        column.period_start = start.isoformat()
+        column.period_end = finish.isoformat()
+        end = start - timedelta(days=1)
 
 
 def finalize_crosswalk(draft: CrosswalkDraft) -> CrosswalkData:
     """Run the deterministic underwriting engine and return a complete crosswalk."""
-    year_1 = draft.operating_year1 or OperatingColumn()
-    if draft.operating_year1 is None:
-        income = draft.financial_data.pro_forma_income
-        expenses = draft.financial_data.pro_forma_expenses
-        year_1 = OperatingColumn(
-            gpr=income.potential_gross_rental_income,
-            laundry_vending=0,
-            parking=0,
-            commercial=0,
-            other_income=income.other_income,
-            real_estate_taxes=expenses.real_estate_taxes,
-            insurance=expenses.insurance,
-            utilities=expenses.utilities,
-            water_sewer=0,
-            repairs_maintenance=expenses.repairs_maintenance,
-            payroll_benefits=expenses.payroll,
-            general_administrative=expenses.administrative,
-            marketing=expenses.marketing,
-            professional_fees=0,
-            management_fee=expenses.management_fee_amount,
-            ground_rent=0,
-            other_expenses=0,
-            replacement_reserves=expenses.replacement_reserves,
-        )
+    year_1 = draft.operating_year1 or derive_year1_from_pro_forma(draft)
     year_2, year_3 = derive_prior_years(year_1, draft.job_id)
-    underwritten = build_underwritten_column(
-        year_1,
-        draft.property_physical.total_units,
-    )
-    try:
-        effective = date.fromisoformat(draft.financial_data.effective_date)
-        year_1_end = effective.replace(day=1) - __import__("datetime").timedelta(days=1)
-        year_1_start = date(
-            year_1_end.year - 1,
-            year_1_end.month,
-            1,
-        )
-        year_2_end = date(year_1_end.year - 1, year_1_end.month, calendar.monthrange(year_1_end.year - 1, year_1_end.month)[1])
-        year_2_start = date(year_2_end.year - 1, year_2_end.month, 1)
-        year_3_end = date(year_2_end.year - 1, year_2_end.month, calendar.monthrange(year_2_end.year - 1, year_2_end.month)[1])
-        year_3_start = date(year_3_end.year - 1, year_3_end.month, 1)
-        year_1.period_start = year_1_start.isoformat()
-        year_1.period_end = year_1_end.isoformat()
-        year_2.period_start = year_2_start.isoformat()
-        year_2.period_end = year_2_end.isoformat()
-        year_3.period_start = year_3_start.isoformat()
-        year_3.period_end = year_3_end.isoformat()
-    except (TypeError, ValueError):
-        pass
+    total_units = draft.property_physical.total_units
+    underwritten = build_underwritten_column(year_1, total_units)
+    _assign_periods(draft.financial_data.effective_date, [year_1, year_2, year_3])
+
     operating_history = OperatingHistory(
         year_1=year_1,
         year_2=year_2,
@@ -300,8 +331,10 @@ def finalize_crosswalk(draft: CrosswalkDraft) -> CrosswalkData:
         underwritten=underwritten,
     )
 
-    inputs = draft.financing_inputs
+    inputs = draft.financing_inputs or {}
     tier = str(inputs.get("tier", "Tier 2"))
+    if tier not in CONVENTIONAL_FIXED_TIERS:
+        tier = "Tier 2"
     tier_constraints = get_tier_constraints(tier)
     note_rate = float(inputs.get("note_rate", 6.0))
     term_months = int(inputs.get("term_months", 120))
@@ -313,8 +346,10 @@ def finalize_crosswalk(draft: CrosswalkDraft) -> CrosswalkData:
     )
 
     appraised_value = draft.valuation.final_value_conclusion.market_value
-    purchase_price = int(inputs.get("purchase_price", appraised_value))
-    underwriting_value = min(appraised_value, purchase_price)
+    loan_purpose = str(inputs.get("loan_purpose", "Acquisition"))
+    is_refi = loan_purpose.lower().startswith("refi")
+    purchase_price = int(inputs.get("purchase_price") or appraised_value)
+    underwriting_value = appraised_value if is_refi else min(appraised_value, purchase_price)
     ncf = underwritten.ncf
 
     dscr_amount = dscr_constrained_amount(
@@ -323,40 +358,30 @@ def finalize_crosswalk(draft: CrosswalkDraft) -> CrosswalkData:
         underwriting_rate,
         amortization_months,
     )
-    ltv_amount = ltv_constrained_amount(
-        underwriting_value,
-        tier_constraints["max_ltv"],
-    )
+    ltv_amount = ltv_constrained_amount(underwriting_value, tier_constraints["max_ltv"])
     loan_amount = min(dscr_amount, ltv_amount)
     binding = "DSCR" if dscr_amount <= ltv_amount else "LTV"
 
-    ads_note = annual_debt_service(
-        loan_amount,
-        note_rate,
-        amortization_months,
-    )
-    ads_underwriting = annual_debt_service(
-        loan_amount,
-        underwriting_rate,
-        amortization_months,
-    )
-    underwritten_dscr = ncf / ads_underwriting if ads_underwriting else 0.0
-    actual_dscr = ncf / ads_note if ads_note else 0.0
-    total_units = draft.property_physical.total_units
+    ads_note = annual_debt_service(loan_amount, note_rate, amortization_months)
+    ads_underwriting = annual_debt_service(loan_amount, underwriting_rate, amortization_months)
     gpr = underwritten.gpr
     total_opex = underwritten.total_operating_expenses
     breakeven = (total_opex + ads_note) / gpr * 100 if gpr else 0.0
 
+    tpr = draft.third_party_reports
+    immediate_repairs = tpr.property_condition_assessment.immediate_repairs if tpr else 0
     sources_uses = balance_sources_uses(
-        loan_amount,
-        purchase_price,
-        int(inputs.get("closing_costs", round(purchase_price * 0.02))),
-        underwritten.replacement_reserves,
-        int(inputs.get("borrower_cash", 0)),
+        loan_amount=loan_amount,
+        loan_purpose=loan_purpose,
+        purchase_price=purchase_price,
+        existing_debt_payoff=int(inputs.get("existing_debt_payoff") or round(appraised_value * 0.55)),
+        closing_costs=int(inputs.get("closing_costs") or round(loan_amount * 0.015)),
+        initial_reserve_deposit=round(underwritten.replacement_reserves / 12),
+        immediate_repairs=round(immediate_repairs * 1.25),
     )
 
     financing = Financing(
-        loan_purpose=str(inputs.get("loan_purpose", "Acquisition")),
+        loan_purpose=loan_purpose,
         execution=str(inputs.get("execution", "DUS")),
         product=str(inputs.get("product", "Conventional Fixed")),
         tier=tier,
@@ -368,8 +393,8 @@ def finalize_crosswalk(draft: CrosswalkDraft) -> CrosswalkData:
         amortization_months=amortization_months,
         interest_only_months=interest_only_months,
         prepayment_terms=str(inputs.get("prepayment_terms", "Yield maintenance")),
-        purchase_price=purchase_price,
-        purchase_date=inputs.get("purchase_date"),
+        purchase_price=None if is_refi else purchase_price,
+        purchase_date=None if is_refi else inputs.get("purchase_date"),
         underwriting_value=underwriting_value,
         appraised_value=appraised_value,
         tier_minimum_dscr=tier_constraints["min_dscr"],
@@ -377,8 +402,8 @@ def finalize_crosswalk(draft: CrosswalkDraft) -> CrosswalkData:
         binding_constraint=binding,
         annual_debt_service_note=ads_note,
         annual_debt_service_underwriting=ads_underwriting,
-        underwritten_dscr=round(underwritten_dscr, 2),
-        actual_dscr=round(actual_dscr, 2),
+        underwritten_dscr=round(ncf / ads_underwriting, 2) if ads_underwriting else 0.0,
+        actual_dscr=round(ncf / ads_note, 2) if ads_note else 0.0,
         ltv_underwriting_value=round(loan_amount / underwriting_value * 100, 2) if underwriting_value else 0,
         ltv_appraised_value=round(loan_amount / appraised_value * 100, 2) if appraised_value else 0,
         debt_yield=round(ncf / loan_amount * 100, 2) if loan_amount else 0,
@@ -389,25 +414,11 @@ def finalize_crosswalk(draft: CrosswalkDraft) -> CrosswalkData:
     )
 
     historical_t12 = {}
-    for label, column in (
-        ("Year 1", year_1),
-        ("Year 2", year_2),
-        ("Year 3", year_3),
-    ):
+    for label, column in (("Year 1", year_1), ("Year 2", year_2), ("Year 3", year_3)):
         historical_t12[label] = HistoricalYear(
             rental_income=column.gpr + column.loss_gain_to_lease,
-            other_income=(
-                column.laundry_vending
-                + column.parking
-                + column.commercial
-                + column.other_income
-            ),
-            vacancy_loss=-(
-                column.vacancy
-                + column.concessions
-                + column.bad_debt
-                + column.non_revenue_units
-            ),
+            other_income=column.laundry_vending + column.parking + column.commercial + column.other_income,
+            vacancy_loss=-(column.vacancy + column.concessions + column.bad_debt + column.non_revenue_units),
             effective_gross_income=column.effective_gross_income,
             operating_expenses=column.total_operating_expenses,
             net_operating_income=column.noi,
@@ -419,6 +430,22 @@ def finalize_crosswalk(draft: CrosswalkDraft) -> CrosswalkData:
     data.pop("financing_inputs", None)
     data["operating_history"] = operating_history.model_dump()
     data["financing"] = financing.model_dump()
-    data["financial_data"]["historical_t12"] = historical_t12
+    data["financial_data"]["historical_t12"] = {k: v.model_dump() for k, v in historical_t12.items()}
+
+    # Sponsor capacity: aggregate net worth >= loan, liquidity >= 9 months debt service.
+    sponsorship = data.get("sponsorship")
+    if sponsorship and sponsorship.get("key_principals"):
+        principals = sponsorship["key_principals"]
+        net_worth_gap = loan_amount - sum(p["net_worth"] for p in principals)
+        if net_worth_gap > 0:
+            principals[0]["net_worth"] += net_worth_gap + round(loan_amount * 0.25, -5)
+        liquidity_need = round(ads_note * 9 / 12)
+        liquidity_gap = liquidity_need - sum(p["liquidity"] for p in principals)
+        if liquidity_gap > 0:
+            principals[0]["liquidity"] += liquidity_gap + round(liquidity_need * 0.5, -4)
+
+    reports = data.get("third_party_reports")
+    if reports:
+        reports["appraisal"]["value"] = appraised_value
 
     return CrosswalkData.model_validate(data)

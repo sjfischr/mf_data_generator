@@ -1,47 +1,79 @@
-from openpyxl import load_workbook
 import io
+import json
 
+from openpyxl import load_workbook
+
+from lambdas.qc_validator import handler as qc
 from lambdas.t12_generator.handler import generate_rent_roll, generate_t12
-from lambdas.shared.chart_of_accounts import CHART_OF_ACCOUNTS
-import pytest
 
 
-@pytest.fixture
-def sample_crosswalk_dict():
-    from tests.unit.test_models import sample_crosswalk_dict as fixture
-    return fixture.__pytest_wrapped__.obj()
+def _workbook(data: bytes):
+    return load_workbook(io.BytesIO(data)).active
 
 
-def test_rent_roll_ties_to_crosswalk(sample_crosswalk_dict):
-    from lambdas.shared.models import CrosswalkData
-
-    crosswalk = CrosswalkData.model_validate(sample_crosswalk_dict)
-    data = generate_rent_roll(crosswalk)
-    wb = load_workbook(io.BytesIO(data), data_only=False)
-    ws = wb["Rent Roll"]
-
-    header = [ws.cell(4, col).value for col in range(1, 14)]
-    assert "In-Place Rent" in header
-    assert ws["A2"].value == f"As of {crosswalk.financial_data.effective_date}"
-    assert ws.max_row >= 10
+def _detail_totals(ws) -> tuple[dict, int]:
+    totals, count = {"4": 0, "5": 0, "6": 0}, 0
+    for row in range(5, ws.max_row + 1):
+        label = str(ws.cell(row, 1).value or "")
+        if label[:4].isdigit():
+            count += 1
+            totals[label[0]] += sum(ws.cell(row, c).value for c in range(2, 14))
+    return totals, count
 
 
-def test_t12_is_deterministic_and_detailed(sample_crosswalk_dict):
-    from lambdas.shared.models import CrosswalkData
+def test_t12_ties_to_operating_history(finalized_crosswalk):
+    cw = finalized_crosswalk
+    for year in (1, 2, 3):
+        ws = _workbook(generate_t12(cw, f"Year {year}", f"Year {year}"))
+        totals, count = _detail_totals(ws)
+        column = getattr(cw.operating_history, f"year_{year}")
+        assert totals["4"] == column.effective_gross_income
+        assert totals["5"] == column.total_operating_expenses
+        assert totals["4"] - totals["5"] - totals["6"] == column.ncf
+        assert count >= 40
+    ws = _workbook(generate_t12(cw, "Year 1", "Year 1"))
+    assert (ws.cell(4, 2).value, ws.cell(4, 13).value) == ("Nov-25", "Oct-26")
+    labels = [str(ws.cell(r, 1).value) for r in range(5, ws.max_row + 1)]
+    assert labels.index("NET OPERATING INCOME") < next(i for i, l in enumerate(labels) if l.startswith("6010"))
+    assert ws.cell(labels.index("NET OPERATING INCOME") + 5, 14).value.startswith("=")
 
-    crosswalk = CrosswalkData.model_validate(sample_crosswalk_dict)
-    first = generate_t12(crosswalk, "Year 1", "Year 1")
-    second = generate_t12(crosswalk, "Year 1", "Year 1")
-    assert first == second
 
-    wb = load_workbook(io.BytesIO(first), data_only=False)
-    ws = wb["T-12 Year 1"]
-    detail_rows = sum(
-        1
-        for row in range(5, ws.max_row + 1)
-        if ws.cell(row, 1).value
-        and any(str(ws.cell(row, 1).value).startswith(number)
-                for number in [str(account[0]) for account in CHART_OF_ACCOUNTS])
-    )
-    assert detail_rows >= 40
+def test_t12_is_deterministic_and_climate_aware(finalized_crosswalk):
+    cw = finalized_crosswalk
+    assert generate_t12(cw, "Year 1", "Year 1") == generate_t12(cw, "Year 1", "Year 1")
+    denver = [str(c.value) for c in _workbook(generate_t12(cw, "Year 1", "Year 1"))["A"]]
+    assert any("Snow Removal" in label for label in denver)
+    cw.property_identification.state = "TX"
+    texas = [str(c.value) for c in _workbook(generate_t12(cw, "Year 1", "Year 1"))["A"]]
+    assert not any("Snow Removal" in label for label in texas)
+    assert not any("Elevator" in label for label in texas)
 
+
+def test_rent_roll_ties_to_crosswalk(finalized_crosswalk):
+    cw = finalized_crosswalk
+    ws = _workbook(generate_rent_roll(cw))
+    assert ws["A2"].value == f"As of {cw.financial_data.effective_date}"
+    rows = [[ws.cell(r, c).value for c in range(1, 14)] for r in range(5, 5 + cw.property_physical.total_units)]
+    assert sum(1 for r in rows if r[12] == "Occupied") == cw.financial_data.occupancy.occupied_units
+    for unit_type, rent in cw.financial_data.in_place_rents_monthly.items():
+        occupied = [r[8] for r in rows if r[1] == unit_type and r[12] == "Occupied"]
+        assert sum(occupied) == rent * len(occupied)
+
+
+def test_qc_detects_t12_mismatch(finalized_crosswalk, mocker):
+    cw = finalized_crosswalk
+    good = {f"outputs/t12_year{y}.xlsx": generate_t12(cw, f"Year {y}", f"Year {y}") for y in (1, 2, 3)}
+    mocker.patch.object(qc, "_read_object", side_effect=lambda job, path: good[path])
+    log = qc.CheckLog()
+    qc.check_t12_workbooks(cw, "job", log)
+    assert log.issues == [] and log.count == 18
+
+    wb = load_workbook(io.BytesIO(good["outputs/t12_year2.xlsx"]))
+    ws = wb.active
+    first_expense = next(r for r in range(5, ws.max_row + 1) if str(ws.cell(r, 1).value).startswith("5"))
+    ws.cell(first_expense, 2).value += 100
+    buf = io.BytesIO(); wb.save(buf); good["outputs/t12_year2.xlsx"] = buf.getvalue()
+    log = qc.CheckLog()
+    qc.check_t12_workbooks(cw, "job", log)
+    assert {i["location"] for i in log.issues} == {"t12_year2.xlsx"}
+    assert any("NOI" in i["description"] for i in log.issues)

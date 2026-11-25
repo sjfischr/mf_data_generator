@@ -127,7 +127,7 @@ def allocate_monthly(
         weights = [1] * 12
 
     if not any(weights):
-        return [0] * 12
+        weights = [1] * 12
 
     values = largest_remainder(annual, weights)
     digest = hashlib.sha256(seed.encode("utf-8")).digest()
@@ -147,3 +147,19 @@ def allocate_monthly(
 
 def category_accounts(category: str):
     return [account for account in CHART_OF_ACCOUNTS if account[2] == category]
+
+
+ELEVATOR_BUILDING_TYPES = {"mid-rise", "high-rise"}
+
+
+def applicable_accounts(category: str, state: str, building_type: str):
+    """Accounts for a category that apply to this property (climate, elevators)."""
+    accounts = []
+    for account in category_accounts(category):
+        number = account[0]
+        if number == "5600" and state.upper() in WARM_CLIMATE_STATES:
+            continue
+        if number == "5590" and building_type not in ELEVATOR_BUILDING_TYPES:
+            continue
+        accounts.append(account)
+    return accounts

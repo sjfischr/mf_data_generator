@@ -1,10 +1,10 @@
-"""Lambda: Crosswalk Generator — Strands Agentic Version.
+"""Lambda: Crosswalk Generator.
 
-THE MOST CRITICAL Lambda in the pipeline.  Uses a Strands agent with
-calculator/arithmetic tools to generate the CrosswalkData JSON.  The agent
-can verify its own math via tools before producing the final output.  Strands'
-structured_output_model auto-validates against the Pydantic schema and retries
-on validation failure.
+THE MOST CRITICAL Lambda in the pipeline. Claude (Haiku role) proposes a
+realistic draft of the property, market, sponsorship, third-party, and loan
+inputs as JSON. A deterministic repair step recomputes every derived figure,
+and the underwriting engine builds the operating history, loan sizing, and
+credit metrics, so no downstream figure depends on LLM arithmetic.
 """
 
 from __future__ import annotations
@@ -14,19 +14,10 @@ import logging
 import os
 import textwrap
 
-from strands import Agent
-from strands.models.bedrock import BedrockModel
-
+from lambdas.shared import bedrock_client, s3_utils
+from lambdas.shared.crosswalk_repair import repair_draft
 from lambdas.shared.models import CrosswalkData, CrosswalkDraft
 from lambdas.shared.underwriting import finalize_crosswalk
-from lambdas.shared import bedrock_client, s3_utils
-from lambdas.shared.agent_tools import (
-    compute_financial_metrics,
-    compute_valuation_metrics,
-    compute_price_per_unit,
-    compute_unit_mix_total_sf,
-    verify_sum,
-)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -37,136 +28,86 @@ REGION = os.environ.get("AWS_REGION", "us-east-1")
 class CrosswalkGenerationError(RuntimeError):
     """Raised when a crosswalk cannot be produced or validated."""
 
+
 SYSTEM_PROMPT = textwrap.dedent("""\
 You are a commercial real estate data specialist generating complete, realistic
-property data for a multifamily apartment appraisal.
+data for a synthetic multifamily appraisal and Fannie Mae DUS loan package.
 
-CRITICAL WORKFLOW:
-1. First, decide on reasonable market values for all line items.
-2. BEFORE assembling the final JSON, use your arithmetic tools to compute
-   every derived total:
-   - Use compute_financial_metrics to get PGI, EGI, total_expenses, NOI
-   - Use compute_valuation_metrics to get indicated_value, value_per_unit, value_per_sf
-   - Use compute_price_per_unit for each comparable sale
-   - Use compute_unit_mix_total_sf for each unit mix row
-   - Use verify_sum to double-check any totals
-3. Use the EXACT computed values from the tools in your final output.
-   Never estimate or round differently than what the tools return.
-
-All dollar amounts are integers (no cents). Percentages are floats (e.g. 5.25).
-Ensure data consistency across all sections and every mathematical relationship holds.
+Return ONE JSON object only - no prose, no markdown fences, no tool calls.
+All dollar amounts are integers (no cents). Percentages are floats (5.25 = 5.25%).
+Derived totals are recomputed downstream, so focus on realistic, internally
+plausible line items for the specific city and property type. All people and
+company names must be fictitious.
 """)
 
 
 def _build_crosswalk_schema_description() -> str:
-    """Return a human-readable description of every field in CrosswalkData."""
+    """Return the JSON contract the model must follow."""
     return textwrap.dedent("""\
-    Produce a single JSON object matching this exact schema.
+    Top-level keys (use exactly these names):
 
-    Top-level keys:
-      job_id             - use the provided value exactly
-      generated_at       - ISO-8601 UTC timestamp string
+    property_identification: {property_name, address, city, state (2-letter),
+      zip (5 digits), county, legal_description, tax_parcel_numbers [str],
+      current_owner, year_built (int), effective_age (int)}
 
-    property_identification:
-      property_name, address, city, state (2-letter), zip (5 or 9 digit),
-      county, legal_description, tax_parcel_numbers (list of strings),
-      current_owner, year_built (int), effective_age (int)
+    property_physical: {total_units, total_buildings, building_type
+      ("garden-style"|"mid-rise"|"high-rise"), stories, gross_building_area_sf,
+      site_area_acres (float), site_area_sf, parking_spaces, parking_ratio (float),
+      unit_mix: [{unit_type, count, avg_size_sf, total_sf, bedrooms, bathrooms}],
+      amenities [str]}  -- unit_mix counts must sum to total_units
 
-    property_physical:
-      total_units (int), total_buildings (int),
-      building_type ("garden-style" | "mid-rise" | "high-rise"),
-      stories (int), gross_building_area_sf (int),
-      site_area_acres (float), site_area_sf (int),
-      parking_spaces (int), parking_ratio (float),
-      unit_mix (list of objects):
-        unit_type (str), count (int), avg_size_sf (int),
-        total_sf (int = count * avg_size_sf), bedrooms (int), bathrooms (int)
-        USE compute_unit_mix_total_sf for each row!
-      amenities (list of strings)
-      RULE: sum of unit_mix[].count MUST equal total_units
+    market_data: {submarket, submarket_vacancy_rate, submarket_rent_growth_yoy,
+      comparable_properties: [>=4 {name, address, units, year_built, occupancy,
+        avg_rent_per_unit}],
+      comparable_sales: [>=3 {property, sale_date, sale_price, units,
+        price_per_unit, cap_rate, noi}]}
 
-    market_data:
-      submarket (str), submarket_vacancy_rate (float 0-100),
-      submarket_rent_growth_yoy (float),
-      comparable_properties (list, min 4):
-        name, address, units (int), year_built (int), occupancy (float 0-100),
-        avg_rent_per_unit (float)
-      comparable_sales (list, min 3):
-        property (str), sale_date (str), sale_price (int), units (int),
-        price_per_unit (int), cap_rate (float 0-100), noi (int)
-        USE compute_price_per_unit for each sale!
+    financial_data: {effective_date,
+      occupancy: {physical_percent, occupied_units, vacant_units},
+      market_rents_monthly: {unit_type: int}, in_place_rents_monthly: {unit_type: int},
+      pro_forma_income: {potential_gross_rental_income, other_income,
+        potential_gross_income, vacancy_collection_loss_percent,
+        vacancy_collection_loss_amount, effective_gross_income},
+      pro_forma_expenses: {real_estate_taxes, insurance, utilities,
+        repairs_maintenance, payroll, management_fee_percent,
+        management_fee_amount, marketing, administrative, replacement_reserves,
+        total_operating_expenses, expense_per_unit},
+      net_operating_income}
 
-    financial_data:
-      effective_date (str ISO date),
-      occupancy:
-        physical_percent (float 0-100), occupied_units (int), vacant_units (int)
-        RULE: occupied_units + vacant_units = total_units
-      market_rents_monthly (dict unit_type -> int)
-      in_place_rents_monthly (dict unit_type -> int)
-      pro_forma_income:
-        potential_gross_rental_income (int), other_income (int),
-        potential_gross_income (int), vacancy_collection_loss_percent (float),
-        vacancy_collection_loss_amount (int), effective_gross_income (int)
-        USE compute_financial_metrics to derive PGI and EGI!
-      pro_forma_expenses:
-        real_estate_taxes, insurance, utilities, repairs_maintenance,
-        payroll, management_fee_percent (float), management_fee_amount (int),
-        marketing, administrative, replacement_reserves,
-        total_operating_expenses (int), expense_per_unit (int)
-        USE compute_financial_metrics to derive total_operating_expenses!
-      net_operating_income (int)
-        USE the NOI value from compute_financial_metrics!
-      historical_t12 (dict year_label -> object):
-        rental_income (int), other_income (int), vacancy_loss (int, negative),
-        effective_gross_income (int), operating_expenses (int),
-        net_operating_income (int)
-        Provide 3 years ("Year 1", "Year 2", "Year 3")
+    valuation: {sales_comparison_approach: {indicated_value, value_per_unit, value_per_sf},
+      income_approach: {stabilized_noi, cap_rate, indicated_value},
+      final_value_conclusion: {market_value, value_per_unit, value_per_sf, effective_date}}
 
-    valuation:
-      sales_comparison_approach:
-        indicated_value (int), value_per_unit (int), value_per_sf (float)
-      income_approach:
-        stabilized_noi (int), cap_rate (float 0-100), indicated_value (int)
-        USE compute_valuation_metrics for this!
-      final_value_conclusion:
-        market_value (int), value_per_unit (int), value_per_sf (float),
-        effective_date (str)
+    operating_year1: trailing-12 ACTUALS for the most recent year, all POSITIVE
+      integers (deductions are positive amounts that get subtracted):
+      {gpr, loss_gain_to_lease, vacancy, concessions, bad_debt, non_revenue_units,
+       laundry_vending, parking, commercial, other_income, real_estate_taxes,
+       insurance, utilities, water_sewer, repairs_maintenance, payroll_benefits,
+       general_administrative, marketing, professional_fees, management_fee,
+       ground_rent, other_expenses, replacement_reserves}
+      Year 1 EGI should be within 10% of the pro forma EGI.
 
-    operating_year1:
-      Year 1 detailed operating statement using Fannie Mae categories:
-      gpr, loss_gain_to_lease, vacancy, concessions, bad_debt,
-      non_revenue_units, laundry_vending, parking, commercial, other_income,
-      real_estate_taxes, insurance, utilities, water_sewer,
-      repairs_maintenance, payroll_benefits, general_administrative,
-      marketing, professional_fees, management_fee, ground_rent,
-      other_expenses, replacement_reserves.
+    financing_inputs: {loan_purpose ("Acquisition"|"Refinance"),
+      tier ("Tier 2"|"Tier 3"|"Tier 4"), note_rate, term_months (60|84|120|144|180),
+      interest_only_months, prepayment_terms, purchase_price}
 
-    financing_inputs:
-      loan_purpose, execution, product, tier, note_rate, term_months,
-      amortization_months, interest_only_months, prepayment_terms,
-      purchase_price, purchase_date, closing_costs, borrower_cash.
+    sponsorship: {borrower_name, borrower_type,
+      key_principals: [{name, role, years_experience, units_owned, net_worth, liquidity}],
+      guarantor, property_management: {name, management_fee_percent, on_site_staffing}}
 
-    history_assumptions:
-      annual_income_growth_percent, annual_expense_growth_percent,
-      and optional one-off expense events.
-
-    sponsorship:
-      fictitious borrower_name, borrower_type, key_principals,
-      guarantor, and property_management.
-
-    third_party_reports:
-      fictitious appraisal, property condition, environmental, seismic,
-      and zoning summary data.
+    third_party_reports: {
+      appraisal: {firm},
+      property_condition_assessment: {firm, immediate_repairs},
+      environmental_site_assessment: {firm, finding},
+      seismic_applicable (bool), zoning_status}
     """)
 
 
 def _build_prompt(user_input: dict, job_id: str) -> str:
     """Assemble the full user prompt."""
-    schema = _build_crosswalk_schema_description()
-
     return textwrap.dedent(f"""\
-    Generate complete, realistic crosswalk data for a synthetic multifamily
-    appraisal report based on the following user input:
+    Generate realistic crosswalk data for a synthetic multifamily appraisal and
+    DUS loan package for this property:
 
     Property Name: {user_input.get('property_name') or 'Generate an appropriate professional property name'}
     Property Address: {user_input['address']}
@@ -176,28 +117,24 @@ def _build_prompt(user_input: dict, job_id: str) -> str:
     Year Built: {user_input['year_built']}
     Property Type: {user_input['property_type']}
 
-    Use this job_id exactly: {job_id}
+    {_build_crosswalk_schema_description()}
 
-    ---
-    SCHEMA REQUIREMENTS:
-    {schema}
-    ---
-
-    IMPORTANT: Before producing the final JSON, you MUST use the arithmetic
-    tools to compute every derived value. Do NOT guess at totals.
-
-    Steps:
-    1. Decide on realistic line-item values for the {user_input['city']}, {user_input['state']} market.
-    2. Call compute_unit_mix_total_sf for each unit type.
-    3. Call compute_price_per_unit for each comparable sale.
-    4. Call compute_financial_metrics with all income/expense line items.
-    5. Call compute_valuation_metrics with the NOI and your chosen cap rate.
-    6. Use verify_sum to confirm unit_mix counts sum to total_units.
-    7. Assemble the final JSON using ONLY the values returned by the tools.
-
-    Generate at least 4 comparable rental properties and at least 3
-    comparable sales.  Use current market cap rates for that MSA.
+    Use current market rents, expenses, and cap rates for the
+    {user_input['city']}, {user_input['state']} market.
+    Return the JSON object only.
     """)
+
+
+def _parse_agent_json(result) -> dict:
+    """Extract a JSON object from a model response (dict, text, or fenced text)."""
+    if isinstance(result, dict):
+        return result
+    raw = str(result).strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        raw = raw[start:end + 1]
+    return json.loads(raw)
 
 
 def _validate_crosswalk(crosswalk: CrosswalkData) -> list[str]:
@@ -245,238 +182,46 @@ def _validate_crosswalk(crosswalk: CrosswalkData) -> list[str]:
     return warnings
 
 
-def _create_crosswalk_agent() -> Agent:
-    """Create the Strands agent for crosswalk generation."""
-    model = BedrockModel(
-        model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
-        region_name=REGION,
-        max_tokens=16000,
-        temperature=0.3,
-    )
-
-
-def _parse_agent_json(result) -> dict:
-    """Extract a JSON object from a Strands 1.x AgentResult."""
-    if isinstance(result, dict):
-        return result
-    if hasattr(result, "structured_output"):
-        return result.structured_output.model_dump()
-
-    raw = str(result).strip()
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        if lines:
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        raw = "\n".join(lines).strip()
-
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start >= 0 and end > start:
-        raw = raw[start:end + 1]
-    return json.loads(raw)
-
-
-def _normalize_draft_data(draft_data: dict) -> dict:
-    """Normalize model variations into the CrosswalkDraft contract."""
-    draft_data = dict(draft_data)
-
-    market = draft_data.get("market_data")
-    if isinstance(market, dict):
-        sales = market.get("comparable_sales")
-        if isinstance(sales, list):
-            for sale in sales:
-                if isinstance(sale, dict):
-                    sale_price = int(sale.get("sale_price", 0))
-                    units = int(sale.get("units", 0))
-                    sale["price_per_unit"] = (
-                        round(sale_price / units) if units else 0
-                    )
-
-    sponsorship = draft_data.get("sponsorship")
-    if isinstance(sponsorship, dict):
-        key_principals = sponsorship.get("key_principals")
-        if isinstance(key_principals, list):
-            for principal in key_principals:
-                if isinstance(principal, dict):
-                    principal["role"] = principal.get(
-                        "role",
-                        principal.get("title", "Principal"),
-                    )
-                    principal["years_experience"] = int(principal.get(
-                        "years_experience",
-                        principal.get("experience_years", 10),
-                    ))
-                    principal["units_owned"] = int(principal.get(
-                        "units_owned",
-                        principal.get("owned_units", 0),
-                    ))
-                    principal["net_worth"] = int(principal.get(
-                        "net_worth",
-                        100_000_000,
-                    ))
-                    principal["liquidity"] = int(principal.get(
-                        "liquidity",
-                        10_000_000,
-                    ))
-        management = sponsorship.get("property_management")
-        if isinstance(management, dict):
-            management["name"] = management.get(
-                "name",
-                management.get("company_name", management.get("company", "Property Management")),
-            )
-            management["management_fee_percent"] = float(management.get(
-                "management_fee_percent",
-                management.get("fee_percent", 4.0),
-            ))
-            management["on_site_staffing"] = management.get(
-                "on_site_staffing",
-                management.get("staffing", "Property manager, leasing, and maintenance"),
-            )
-
-    third_party = draft_data.get("third_party_reports")
-    if isinstance(third_party, dict):
-        appraisal = third_party.get("appraisal")
-        if isinstance(appraisal, dict):
-            third_party["appraisal"] = {
-                "firm": appraisal.get("firm", appraisal.get("appraiser_name", "Independent Appraiser")),
-                "date": appraisal.get("date", appraisal.get("appraisal_date", "2026-01-15")),
-                "value": int(appraisal.get("value", appraisal.get("appraisal_value", 0))),
-            }
-
-        condition = third_party.get("property_condition_assessment")
-        if condition is None:
-            condition = third_party.get("property_condition")
-        if isinstance(condition, dict):
-            immediate = int(condition.get(
-                "immediate_repairs",
-                condition.get("deferred_maintenance", 0),
-            ))
-            third_party["property_condition_assessment"] = {
-                "firm": condition.get("firm", condition.get("inspector", "Independent PCA Consultant")),
-                "date": condition.get("date", condition.get("inspection_date", "2026-01-10")),
-                "immediate_repairs": immediate,
-                "twelve_year_reserve_need": int(condition.get(
-                    "twelve_year_reserve_need",
-                    immediate * 10,
-                )),
-            }
-
-        environment = third_party.get("environmental_site_assessment")
-        if environment is None:
-            environment = third_party.get("environmental")
-        if isinstance(environment, dict):
-            third_party["environmental_site_assessment"] = {
-                "firm": environment.get("firm", environment.get("phase_1_provider", "Independent Environmental Consultant")),
-                "date": environment.get("date", environment.get("phase_1_date", "2026-01-10")),
-                "finding": environment.get("finding", environment.get("findings", "No significant conditions identified")),
-            }
-
-        seismic = third_party.get("seismic")
-        third_party["seismic_applicable"] = bool(
-            third_party.get(
-                "seismic_applicable",
-                isinstance(seismic, dict) and seismic.get("retrofit_required", False),
-            )
-        )
-
-        zoning = third_party.get("zoning")
-        if isinstance(zoning, dict):
-            third_party["zoning_status"] = third_party.get(
-                "zoning_status",
-                zoning.get("zoning_classification", "Conforming"),
-            )
-        else:
-            third_party.setdefault("zoning_status", "Conforming")
-
-    financing = draft_data.get("financing_inputs")
-    if isinstance(financing, dict) and financing.get("tier") == "Tier 1":
-        financing["tier"] = "Tier 2"
-
-    return draft_data
-
-    return Agent(
-        name="crosswalk_generator",
-        model=model,
+def generate_crosswalk(user_input: dict, job_id: str) -> CrosswalkData:
+    """Draft with the model, repair deterministically, and finalize underwriting."""
+    raw = bedrock_client.invoke_model_json(
+        prompt=_build_prompt(user_input, job_id),
+        model="haiku",
         system_prompt=SYSTEM_PROMPT,
-        tools=[
-            compute_financial_metrics,
-            compute_valuation_metrics,
-            compute_price_per_unit,
-            compute_unit_mix_total_sf,
-            verify_sum,
-        ],
+        max_tokens=16000,
     )
+    repaired = repair_draft(_parse_agent_json(raw), user_input, job_id)
+    draft = CrosswalkDraft.model_validate(repaired)
+    crosswalk = finalize_crosswalk(draft)
+    crosswalk.job_id = job_id
+    return crosswalk
 
 
 def handler(event, context):
-    """AWS Lambda entry point.
-
-    Expects ``{"job_id": "<uuid>"}``.  Reads ``input.json`` from S3,
-    generates crosswalk data via a Strands agent backed by Bedrock Haiku
-    with arithmetic tools, validates with Pydantic, and writes
-    ``crosswalk-data.json`` back to S3.
-    """
+    """AWS Lambda entry point. Expects ``{"job_id": "<uuid>"}``."""
     job_id = event["job_id"]
-    logger.info("Crosswalk generator (agentic) started for job %s", job_id)
+    logger.info("Crosswalk generator started for job %s", job_id)
 
-    # ------------------------------------------------------------------
-    # 1. Read user input
-    # ------------------------------------------------------------------
     user_input = s3_utils.read_json(job_id, "input.json")
     logger.info("User input: %s", json.dumps(user_input))
 
-    # ------------------------------------------------------------------
-    # 2. Generate crosswalk data via Strands agent
-    # ------------------------------------------------------------------
-    prompt = _build_prompt(user_input, job_id)
+    last_error: Exception | None = None
+    crosswalk = None
+    for attempt in range(1, 3):
+        try:
+            crosswalk = generate_crosswalk(user_input, job_id)
+            break
+        except Exception as exc:  # retry once on malformed model output
+            last_error = exc
+            logger.exception("Crosswalk attempt %d failed: %s", attempt, exc)
+    if crosswalk is None:
+        raise CrosswalkGenerationError(f"Crosswalk generation failed: {last_error}") from last_error
 
-    try:
-        # Bedrock JSON mode avoids AgentResult API drift in Strands 1.x.
-        # The deterministic underwriting engine below performs all derived math.
-        draft_data = bedrock_client.invoke_model_json(
-            prompt=prompt,
-            model="haiku",
-            system_prompt=SYSTEM_PROMPT,
-            max_tokens=16000,
-        )
-        draft_data = _parse_agent_json(draft_data)
-        draft_data = _normalize_draft_data(draft_data)
-        draft = CrosswalkDraft.model_validate(draft_data)
-        draft.job_id = job_id
-        crosswalk = finalize_crosswalk(draft)
-
-        # Force the correct job_id in case the model changed it
-        crosswalk.job_id = job_id
-
-        # Deterministic guardrail: always recompute derived valuation metrics
-        # so downstream QC cannot fail on LLM rounding drift.
-        market_value = crosswalk.valuation.final_value_conclusion.market_value
-        total_units = crosswalk.property_physical.total_units
-        corrected_value_per_unit = round(market_value / total_units)
-        crosswalk.valuation.final_value_conclusion.value_per_unit = corrected_value_per_unit
-
-        logger.info("Crosswalk generated and validated successfully")
-
-    except Exception as exc:
-        logger.exception("Crosswalk generation failed: %s", exc)
-        raise CrosswalkGenerationError(
-            f"Crosswalk generation failed: {exc}"
-        ) from exc
-
-    # ------------------------------------------------------------------
-    # 3. Business-logic warnings (non-fatal)
-    # ------------------------------------------------------------------
     warnings = _validate_crosswalk(crosswalk)
     if warnings:
         logger.warning("Crosswalk warnings: %s", "; ".join(warnings))
 
-    # ------------------------------------------------------------------
-    # 4. Persist to S3
-    # ------------------------------------------------------------------
-    crosswalk_dict = crosswalk.model_dump()
-    s3_key = s3_utils.write_json(job_id, "crosswalk-data.json", crosswalk_dict)
+    s3_key = s3_utils.write_json(job_id, "crosswalk-data.json", crosswalk.model_dump())
     logger.info("Saved crosswalk data to %s", s3_key)
 
     return {

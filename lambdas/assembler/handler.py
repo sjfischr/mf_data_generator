@@ -530,15 +530,33 @@ def handler(event, context):
     # Insert images
     combined_markdown = insert_images(combined_markdown, job_id)
 
-    # Convert to DOCX with the shared renderer
+    # Convert to DOCX with the shared renderer, embedding the generated photos
     property_name, location_text = get_cover_metadata(job_id)
-    docx_bytes = shared_markdown_to_docx(
-        combined_markdown,
-        property_name=property_name,
-        lender_name=LENDER_NAME,
-        title=REPORT_TITLE,
-        location_text=location_text,
-    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_map: dict[str, str] = {}
+        cover_image_path = None
+        try:
+            manifest = s3_utils.read_json(job_id, "images/manifest.json")
+            s3 = s3_utils.get_s3_client()
+            for entry in manifest:
+                if entry.get("status") == "success" and entry.get("s3_key"):
+                    local_path = os.path.join(tmpdir, entry["filename"])
+                    s3.download_file(s3_utils.BUCKET, entry["s3_key"], local_path)
+                    image_map[entry["filename"]] = local_path
+            cover_name = select_cover_image_filename(manifest)
+            cover_image_path = image_map.get(cover_name) if cover_name else None
+        except Exception as exc:
+            logger.warning("Could not download images for DOCX: %s", exc)
+
+        docx_bytes = shared_markdown_to_docx(
+            combined_markdown,
+            property_name=property_name,
+            lender_name=LENDER_NAME,
+            title=REPORT_TITLE,
+            location_text=location_text,
+            cover_image_path=cover_image_path,
+            image_map=image_map,
+        )
 
     # Upload DOCX
     s3_utils.write_bytes(

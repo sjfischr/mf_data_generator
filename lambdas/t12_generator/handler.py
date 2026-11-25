@@ -14,11 +14,11 @@ from openpyxl.utils import get_column_letter
 
 from lambdas.shared import s3_utils
 from lambdas.shared.chart_of_accounts import (
-    CHART_OF_ACCOUNTS,
     allocate_monthly,
+    applicable_accounts,
     largest_remainder,
 )
-from lambdas.shared.models import CrosswalkData
+from lambdas.shared.models import CrosswalkData, OperatingColumn
 
 logger = logging.getLogger(__name__)
 
@@ -239,222 +239,206 @@ def generate_rent_roll(crosswalk: CrosswalkData) -> bytes:
     return buf.getvalue()
 
 
+RENTAL_CATEGORIES = [
+    ("gpr", 1),
+    ("loss_gain_to_lease", 1),
+    ("vacancy", -1),
+    ("concessions", -1),
+    ("bad_debt", -1),
+    ("non_revenue_units", -1),
+]
+OTHER_INCOME_CATEGORIES = ["laundry_vending", "parking", "commercial", "other_income"]
+BOLD = Font(name="Calibri", size=11, bold=True)
+SUBTOTAL_FILL = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
+TOTAL_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
+
+
+def _operating_column(crosswalk: CrosswalkData, year_key: str) -> OperatingColumn:
+    if crosswalk.operating_history is not None:
+        return getattr(crosswalk.operating_history, year_key.lower().replace(" ", "_"))
+    hist = crosswalk.financial_data.historical_t12.get(year_key)
+    if hist is None:
+        raise ValueError(f"No operating data for {year_key}")
+    return OperatingColumn(
+        gpr=hist.rental_income,
+        vacancy=-hist.vacancy_loss,
+        other_income=hist.other_income,
+        other_expenses=hist.operating_expenses,
+    )
+
+
+def _month_labels(column: OperatingColumn, crosswalk: CrosswalkData, year_index: int) -> list[str]:
+    if column.period_start:
+        start = date.fromisoformat(column.period_start)
+    else:
+        effective = date.fromisoformat(crosswalk.financial_data.effective_date)
+        start = date(effective.year - year_index, effective.month, 1)
+    labels = []
+    year, month = start.year, start.month
+    for _ in range(12):
+        labels.append(date(year, month, 1).strftime("%b-%y"))
+        month += 1
+        if month == 13:
+            year, month = year + 1, 1
+    return labels
+
+
+def _allocate_category(
+    crosswalk: CrosswalkData, category: str, annual: int, seed: str,
+) -> list[tuple[str, str, list[int]]]:
+    """Split a category's annual amount into GL accounts and months (exact integers)."""
+    prop = crosswalk.property_identification
+    phys = crosswalk.property_physical
+    accounts = applicable_accounts(category, prop.state, phys.building_type)
+    rng = random.Random(int.from_bytes(hashlib.sha256(f"{seed}:{category}".encode()).digest()[:8], "big"))
+    weights = [max(1, round(account[4] * rng.uniform(0.85, 1.15))) for account in accounts]
+    rows = []
+    for (number, name, _, profile, _), amount in zip(accounts, largest_remainder(annual, weights)):
+        monthly = allocate_monthly(amount, profile, f"{seed}:{number}", prop.state)
+        rows.append((number, name, monthly))
+    return rows
+
+
 def generate_t12(crosswalk: CrosswalkData, year_key: str, year_label: str) -> bytes:
+    """Generate a detailed T-12 operating statement whose subtotals are live formulas."""
     wb = Workbook()
     ws = wb.active
     ws.title = f"T-12 {year_label}"
 
     prop = crosswalk.property_identification
-    fin = crosswalk.financial_data
-
-    ws.merge_cells("A1:R1")
-    ws["A1"] = f"Trailing 12-Month Operating Statement — {prop.property_name}"
-    ws["A1"].font = Font(name="Calibri", size=14, bold=True)
-    ws.merge_cells("A2:R2")
-    ws["A2"] = year_label
-    ws["A2"].font = Font(name="Calibri", size=11, italic=True)
-
+    units = crosswalk.property_physical.total_units
     year_index = {"Year 1": 1, "Year 2": 2, "Year 3": 3}.get(year_key, 1)
-    try:
-        effective = date.fromisoformat(fin.effective_date)
-        period_end = effective.replace(day=1) - timedelta(days=1)
-        period_end = period_end.replace(year=period_end.year - (year_index - 1))
-    except ValueError:
-        period_end = date(2026, 2, 10)
-        period_end = period_end.replace(year=period_end.year - (year_index - 1))
+    column = _operating_column(crosswalk, year_key)
+    months = _month_labels(column, crosswalk, year_index)
+    seed = f"{crosswalk.job_id}:{year_key}"
 
-    months = []
-    cursor = period_end
-    for _ in range(12):
-        months.append(cursor.strftime("%b-%y"))
-        cursor = (cursor.replace(day=1) - timedelta(days=1))
-    months = list(reversed(months))
+    ws.merge_cells("A1:P1")
+    ws["A1"] = f"Trailing 12-Month Operating Statement ? {prop.property_name}"
+    ws["A1"].font = Font(name="Calibri", size=14, bold=True)
+    ws.merge_cells("A2:P2")
+    ws["A2"] = f"{year_label}: {months[0]} through {months[-1]} ? {units} units ? Synthetic data"
+    ws["A2"].font = Font(name="Calibri", size=11, italic=True)
 
     headers = ["Account"] + months + ["Annual Total", "Per Unit", "% of EGI"]
     for col, header in enumerate(headers, 1):
         ws.cell(row=4, column=col, value=header)
     style_header_row(ws, 4, len(headers))
 
-    operating = None
-    if crosswalk.operating_history is not None:
-        operating = getattr(crosswalk.operating_history, year_key.lower().replace(" ", "_"), None)
-
-    if operating is not None:
-        category_values = {
-            field: getattr(operating, field)
-            for field, _ in EXPENSE_CATEGORIES
-        }
-        gpr = operating.gpr
-        loss_gain = operating.loss_gain_to_lease
-        vacancy = operating.vacancy
-        concessions = operating.concessions
-        bad_debt = operating.bad_debt
-        non_revenue = operating.non_revenue_units
-        other_income = (
-            operating.laundry_vending
-            + operating.parking
-            + operating.commercial
-            + operating.other_income
-        )
-        replacement_reserves = operating.replacement_reserves
-    else:
-        hist = fin.historical_t12.get(year_key)
-        if hist is None:
-            hist = fin.historical_t12.get(year_key.lower().replace(" ", "_"))
-        if hist is not None:
-            gpr = hist.rental_income
-            loss_gain = 0
-            vacancy = abs(hist.vacancy_loss)
-            concessions = 0
-            bad_debt = 0
-            non_revenue = 0
-            other_income = hist.other_income
-            replacement_reserves = fin.pro_forma_expenses.replacement_reserves
-            category_values = {
-                field: getattr(fin.pro_forma_expenses, "real_estate_taxes" if field == "real_estate_taxes" else field, 0)
-                for field, _ in EXPENSE_CATEGORIES
-            }
-        else:
-            gpr = 0
-            loss_gain = 0
-            vacancy = concessions = bad_debt = non_revenue = 0
-            other_income = 0
-            replacement_reserves = 0
-            category_values = {field: 0 for field, _ in EXPENSE_CATEGORIES}
-
-    seed = f"{crosswalk.job_id}:{year_key}"
-    state = prop.state
-    total_units = phys = crosswalk.property_physical.total_units
-
     row = 5
-    ws.cell(row=row, column=1, value="INCOME")
-    ws.cell(row=row, column=1).font = Font(bold=True)
-    row += 1
+    egi_ref: dict[str, int] = {}
+    percent_rows: list[int] = []
 
-    category_detail_rows = []
-
-    def write_category(category: str, label: str, annual: int) -> list[int]:
+    def label_row(text: str) -> None:
         nonlocal row
-        ws.cell(row=row, column=1, value=label)
-        ws.cell(row=row, column=1).font = Font(bold=True)
-        category_row = row
+        ws.cell(row=row, column=1, value=text).font = BOLD
         row += 1
-        accounts = [a for a in CHART_OF_ACCOUNTS if a[2] == category]
-        weights = [a[4] for a in accounts]
-        allocations = largest_remainder(annual, weights)
-        detail_rows = []
-        for account, allocation in zip(accounts, allocations):
-            number, name, _, profile, _ = account
-            ws.cell(row=row, column=1, value=f"{number} {name}")
-            monthly = allocate_monthly(allocation, profile, f"{seed}:{number}", state)
-            for col, val in enumerate(monthly, 2):
-                ws.cell(row=row, column=col, value=val).number_format = CURRENCY_FMT
-            ws.cell(row=row, column=14, value=allocation).number_format = CURRENCY_FMT
-            ws.cell(row=row, column=15, value=f"={get_column_letter(14)}{row}/{total_units}").number_format = CURRENCY_FMT
-            ws.cell(row=row, column=16, value=0).number_format = PCT_FMT
-            detail_rows.append(row)
-            row += 1
-        if detail_rows:
-            start = detail_rows[0]
-            end = detail_rows[-1]
-            for col in range(2, 15):
-                letter = get_column_letter(col)
-                ws.cell(category_row, col, f"=SUM({letter}{start}:{letter}{end})").number_format = CURRENCY_FMT
-            ws.cell(category_row, 14, f"=SUM(N{start}:N{end})").number_format = CURRENCY_FMT
-            ws.cell(category_row, 15, f"=N{category_row}/{total_units}").number_format = CURRENCY_FMT
-        category_detail_rows.append(detail_rows)
-        return detail_rows
 
-    gpr_rows = write_category("gpr", "Gross Potential Rent", gpr)
-    write_category("loss_gain_to_lease", "Loss/Gain to Lease", loss_gain)
-    vacancy_rows = write_category("vacancy", "Less: Vacancy", -vacancy)
-    write_category("concessions", "Less: Concessions", -concessions)
-    write_category("bad_debt", "Less: Bad Debt", -bad_debt)
-    write_category("non_revenue_units", "Less: Non-Revenue Units", -non_revenue)
+    def detail_row(number: str, name: str, monthly: list[int], sign: int = 1) -> int:
+        nonlocal row
+        ws.cell(row=row, column=1, value=f"{number} {name}").font = DATA_FONT
+        for i, amount in enumerate(monthly):
+            ws.cell(row=row, column=2 + i, value=sign * amount).number_format = CURRENCY_FMT
+        ws.cell(row=row, column=14, value=f"=SUM(B{row}:M{row})").number_format = CURRENCY_FMT
+        ws.cell(row=row, column=15, value=f"=ROUND(N{row}/{units},0)").number_format = CURRENCY_FMT
+        percent_rows.append(row)
+        row += 1
+        return row - 1
 
-    nri_row = row
-    ws.cell(row=row, column=1, value="NET RENTAL INCOME")
-    formula_cols = [col for col in range(2, 15)]
-    formulas = []
-    for col in range(2, 15):
-        letter = get_column_letter(col)
-        components = [f"{letter}{r}" for r in gpr_rows]
-        if components:
-            formula = "=" + "+".join(components)
-        else:
-            formula = "=0"
-        ws.cell(row=row, column=col, value=formula).number_format = CURRENCY_FMT
-    ws.cell(row=row, column=14, value=f"=N{row - 1}") if row else None
-    row += 1
-
-    ws.cell(row=row, column=1, value="OTHER INCOME")
-    ws.cell(row=row, column=1).font = Font(bold=True)
-    row += 1
-    other_category_names = [
-        ("laundry_vending", "Laundry / Vending"),
-        ("parking", "Parking"),
-        ("commercial", "Commercial Income"),
-        ("other_income", "Other Income"),
-    ]
-    other_detail_rows = []
-    remaining_other = other_income
-    weights = [1, 1, 1, 1]
-    allocations = largest_remainder(remaining_other, weights)
-    for (category, label), allocation in zip(other_category_names, allocations):
-        other_detail_rows.extend(write_category(category, label, allocation))
-
-    egi_row = row
-    ws.cell(row=row, column=1, value="EFFECTIVE GROSS INCOME")
-    for col in range(2, 15):
-        letter = get_column_letter(col)
-        ws.cell(row=row, column=col, value=f"={letter}{nri_row}+SUM({letter}{egi_row - len(other_detail_rows)}:{letter}{egi_row - 1})").number_format = CURRENCY_FMT
-    ws.cell(row=row, column=14, value=f"=SUM(N{row - len(other_detail_rows)}:N{row - 1})+N{nri_row}").number_format = CURRENCY_FMT
-    row += 1
-
-    ws.cell(row=row, column=1, value="OPERATING EXPENSES")
-    ws.cell(row=row, column=1).font = Font(bold=True)
-    row += 1
-    expense_detail_rows = []
-    for category, label in EXPENSE_CATEGORIES:
-        annual = category_values.get(category, 0)
-        expense_detail_rows.extend(write_category(category, label, annual))
-
-    total_expense_row = row
-    ws.cell(row=row, column=1, value="TOTAL OPERATING EXPENSES")
-    if expense_detail_rows:
+    def formula_row(text: str, template: str, fill=SUBTOTAL_FILL) -> int:
+        """template uses {c} as the column letter placeholder."""
+        nonlocal row
+        ws.cell(row=row, column=1, value=text).font = BOLD
         for col in range(2, 15):
             letter = get_column_letter(col)
-            ws.cell(row=row, column=col, value=f"=SUM({letter}{expense_detail_rows[0]}:{letter}{expense_detail_rows[-1]})").number_format = CURRENCY_FMT
-    ws.cell(row=row, column=14, value=f"=SUM(N{expense_detail_rows[0]}:N{expense_detail_rows[-1]})").number_format = CURRENCY_FMT if expense_detail_rows else None
+            cell = ws.cell(row=row, column=col, value="=" + template.format(c=letter))
+            cell.number_format = CURRENCY_FMT
+            cell.font = BOLD
+        ws.cell(row=row, column=15, value=f"=ROUND(N{row}/{units},0)").number_format = CURRENCY_FMT
+        for col in range(1, 17):
+            ws.cell(row=row, column=col).fill = fill
+        percent_rows.append(row)
+        row += 1
+        return row - 1
+
+    # --- Revenue -----------------------------------------------------------
+    label_row("REVENUE")
+    rental_rows = []
+    vacancy_rows = []
+    gpr_row = None
+    for category, sign in RENTAL_CATEGORIES:
+        amount = abs(getattr(column, category)) if sign < 0 else getattr(column, category)
+        for number, name, monthly in _allocate_category(crosswalk, category, amount, seed):
+            r = detail_row(number, name, monthly, sign)
+            rental_rows.append(r)
+            if category == "gpr" and gpr_row is None:
+                gpr_row = r
+            if category == "vacancy":
+                vacancy_rows.append(r)
+    nri_row = formula_row("NET RENTAL INCOME", f"SUM({{c}}{rental_rows[0]}:{{c}}{rental_rows[-1]})")
+
+    other_rows = []
+    for category in OTHER_INCOME_CATEGORIES:
+        for number, name, monthly in _allocate_category(crosswalk, category, getattr(column, category), seed):
+            other_rows.append(detail_row(number, name, monthly))
+    toi_row = formula_row("TOTAL OTHER INCOME", f"SUM({{c}}{other_rows[0]}:{{c}}{other_rows[-1]})")
+    egi_row = formula_row("EFFECTIVE GROSS INCOME", f"{{c}}{nri_row}+{{c}}{toi_row}", TOTAL_FILL)
+    egi_ref["row"] = egi_row
     row += 1
 
-    noi_row = row
-    ws.cell(row=row, column=1, value="NET OPERATING INCOME")
-    for col in range(2, 15):
+    # --- Operating expenses ------------------------------------------------
+    label_row("OPERATING EXPENSES")
+    category_total_rows = []
+    for category, title in EXPENSE_CATEGORIES:
+        detail_rows = [
+            detail_row(number, name, monthly)
+            for number, name, monthly in _allocate_category(crosswalk, category, getattr(column, category), seed)
+        ]
+        category_total_rows.append(
+            formula_row(f"Total {title.title()}", f"SUM({{c}}{detail_rows[0]}:{{c}}{detail_rows[-1]})")
+        )
+    opex_row = formula_row(
+        "TOTAL OPERATING EXPENSES",
+        "+".join(f"{{c}}{r}" for r in category_total_rows),
+        TOTAL_FILL,
+    )
+    noi_row = formula_row("NET OPERATING INCOME", f"{{c}}{egi_row}-{{c}}{opex_row}", TOTAL_FILL)
+    row += 1
+
+    # --- Below the line ----------------------------------------------------
+    label_row("BELOW THE LINE (excluded from NOI)")
+    reserve_monthly = allocate_monthly(column.replacement_reserves, "level", f"{seed}:6010", prop.state)
+    reserve_row = detail_row("6010", "Replacement Reserve Deposits", reserve_monthly)
+    formula_row("NET CASH FLOW", f"{{c}}{noi_row}-{{c}}{reserve_row}", TOTAL_FILL)
+    row += 1
+
+    # % of EGI for income/expense rows
+    for r in percent_rows:
+        ws.cell(row=r, column=16, value=f"=IF($N${egi_row}=0,0,N{r}/$N${egi_row})").number_format = PCT_FMT
+
+    # --- Occupancy statistics ---------------------------------------------
+    label_row("OCCUPANCY STATISTICS")
+    occupied_row = row
+    ws.cell(row=row, column=1, value="Occupied Units").font = DATA_FONT
+    for col in range(2, 14):
         letter = get_column_letter(col)
-        ws.cell(row=row, column=col, value=f"={letter}{egi_row}-{letter}{total_expense_row}").number_format = CURRENCY_FMT
-    ws.cell(row=row, column=14, value=f"=N{egi_row}-N{total_expense_row}").number_format = CURRENCY_FMT
+        vacancy_sum = "+".join(f"{letter}{r}" for r in vacancy_rows) or "0"
+        ws.cell(row=row, column=col,
+                value=f"=ROUND({units}*(1+({vacancy_sum})/{letter}{gpr_row}),0)")
     row += 1
-
-    reserve_row = row
-    ws.cell(row=row, column=1, value="LESS: REPLACEMENT RESERVES")
-    monthly_reserve = allocate_monthly(replacement_reserves, "level", f"{seed}:reserve", state)
-    for col, val in enumerate(monthly_reserve, 2):
-        ws.cell(row=row, column=col, value=val).number_format = CURRENCY_FMT
-    ws.cell(row=row, column=14, value=replacement_reserves).number_format = CURRENCY_FMT
-    ws.cell(row=row, column=15, value=f"=N{reserve_row}/{total_units}").number_format = CURRENCY_FMT
-    row += 1
-
-    ncf_row = row
-    ws.cell(row=row, column=1, value="NET CASH FLOW")
-    for col in range(2, 15):
+    ws.cell(row=row, column=1, value="Physical Occupancy %").font = DATA_FONT
+    for col in range(2, 14):
         letter = get_column_letter(col)
-        ws.cell(row=row, column=col, value=f"={letter}{noi_row}-{letter}{reserve_row}").number_format = CURRENCY_FMT
-    ws.cell(row=row, column=14, value=f"=N{noi_row}-N{reserve_row}").number_format = CURRENCY_FMT
+        ws.cell(row=row, column=col, value=f"={letter}{occupied_row}/{units}").number_format = PCT_FMT
+    row += 1
+    ws.cell(row=row, column=1, value="Economic Occupancy %").font = DATA_FONT
+    for col in range(2, 14):
+        letter = get_column_letter(col)
+        ws.cell(row=row, column=col, value=f"={letter}{nri_row}/{letter}{gpr_row}").number_format = PCT_FMT
 
-    ws.column_dimensions["A"].width = 34
+    ws.column_dimensions["A"].width = 40
     for col in range(2, 17):
         ws.column_dimensions[get_column_letter(col)].width = 12
+    ws.freeze_panes = "B5"
 
     buf = io.BytesIO()
     wb.save(buf)
