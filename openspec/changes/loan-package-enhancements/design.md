@@ -196,6 +196,14 @@ See `proposal.md` for motivation; requirements are in `specs/*/spec.md`. Facts o
 - **Dependencies:** pin the Python dependencies in `requirements.txt`, `lambdas/requirements-runtime.txt`, and the per-Lambda files.
 - **Storage:** add `noncurrent_version_expiration=7 days` to the bucket lifecycle.
 
+### D9. Implementation notes (as built, 2026-11-25)
+- **Crosswalk drafting uses Bedrock JSON, not Strands structured output.** Strands 1.12 `AgentResult` has no `structured_output`, and Haiku's draft field names and arithmetic drift. `lambdas/shared/crosswalk_repair.py` maps aliases, recomputes every derived figure (unit mix, pro forma, valuation, occupancy), sets the effective date to the run date, and supplies fictitious sponsorship and third-party defaults. `finalize_crosswalk` then sizes the loan. The handler retries the draft once.
+- **Year 1 fallback:** if the model's Year 1 detail is invalid or outside the EGI band, `derive_year1_from_pro_forma` builds it from the appraiser pro forma.
+- **Image prompts** are generated in three concurrent batches of 10 sharing one architectural concept; the Bedrock client read timeout is 900s.
+- **Shared layer limit:** `fal-client`, `python-docx`, and `openpyxl` are bundled per Lambda (Image, T-12, Narrative, QC, Assembler) to keep the shared layer under 250 MB.
+- **Models:** Claude Opus 5 / Sonnet 5 are not entitled in the account; the `BEDROCK_*_MODEL_ARN` secrets point to the Opus 4.6 / Sonnet 4.6 global profiles until access is granted.
+- **Refinance projection** grows non-tax expenses at 2%/yr (taxes 3%, income 2%).
+
 ## Risks / Trade-offs
 
 - **[Risk] Turbo images look less consistent than Large at `creativity: low`.**

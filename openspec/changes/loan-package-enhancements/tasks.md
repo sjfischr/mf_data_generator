@@ -208,7 +208,7 @@
 
   Verify: the Mermaid blocks render in a Markdown preview.
 - [x] 9.2 Run `openspec validate loan-package-enhancements --strict` and `pytest tests -q`. Verify: both pass.
-- [ ] 9.3 After deploying locally (`cdk deploy --all`, with `FAL_KEY` set), run one end-to-end job from the UI. Verify:
+- [x] 9.3 After deploying locally (`cdk deploy --all`, with `FAL_KEY` set), run one end-to-end job from the UI. Verify:
   - every download link works
   - the ZIP contains the narrative, the 3 T-12s, the rent roll, `qc_report.json`, and `photos/`
   - the status response shows a `qc` block

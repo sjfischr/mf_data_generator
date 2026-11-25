@@ -99,6 +99,7 @@ def build_fact_sheet(cw: CrosswalkData) -> dict:
             "income_approach_value": money(val.income_approach.indicated_value),
             "sales_comparison_value": money(val.sales_comparison_approach.indicated_value),
             "underwriting_value": money(loan.underwriting_value),
+            "equity_cushion_below_value": money(loan.underwriting_value - loan.loan_amount),
             "appraiser_noi_after_reserves": money(fin.net_operating_income),
             "appraiser_egi": money(fin.pro_forma_income.effective_gross_income),
         },
@@ -138,6 +139,11 @@ def build_fact_sheet(cw: CrosswalkData) -> dict:
             ],
             "aggregate_net_worth": money(sum(p.net_worth for p in sp.key_principals)),
             "aggregate_liquidity": money(sum(p.liquidity for p in sp.key_principals)),
+            "net_worth_to_loan": ratio(sum(p.net_worth for p in sp.key_principals) / max(1, loan.loan_amount)),
+            "liquidity_to_annual_debt_service": ratio(
+                sum(p.liquidity for p in sp.key_principals) / max(1, loan.annual_debt_service_note)),
+            "liquidity_months_of_debt_service": round(
+                sum(p.liquidity for p in sp.key_principals) / max(1, loan.annual_debt_service_note) * 12, 1),
             "management_company": sp.property_management.name,
             "management_fee": pct(sp.property_management.management_fee_percent),
             "on_site_staffing": sp.property_management.on_site_staffing,
