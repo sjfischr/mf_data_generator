@@ -117,6 +117,7 @@ class LambdaStack(Stack):
             memory_size=1024,
             timeout_minutes=10,
             extra_env={"FAL_KEY": fal_key},
+            bundle_requirements=True,
         )
 
         self.qc_validator = self._create_lambda(
@@ -132,6 +133,7 @@ class LambdaStack(Stack):
             memory_size=1024,
             timeout_minutes=15,
             ephemeral_storage_gb=2048,
+            bundle_requirements=True,
         )
 
         self.t12_generator = self._create_lambda(
@@ -139,6 +141,7 @@ class LambdaStack(Stack):
             handler_path="lambdas/t12_generator",
             memory_size=512,
             timeout_minutes=5,
+            bundle_requirements=True,
         )
 
         self.lender_narrative_generator = self._create_lambda(
@@ -146,6 +149,7 @@ class LambdaStack(Stack):
             handler_path="lambdas/lender_narrative_generator",
             memory_size=1024,
             timeout_minutes=10,
+            bundle_requirements=True,
         )
 
         # --- Section generator Lambdas (section_01 through section_12) ---
@@ -223,18 +227,34 @@ class LambdaStack(Stack):
         timeout_minutes: int = 5,
         extra_env: dict | None = None,
         ephemeral_storage_gb: int | None = None,
+        bundle_requirements: bool = False,
     ) -> _lambda.Function:
         """Create a Lambda function with standard configuration."""
         environment = {**self.shared_env}
         if extra_env:
             environment.update(extra_env)
 
+        code = _lambda.Code.from_asset(handler_path)
+        if bundle_requirements:
+            code = _lambda.Code.from_asset(
+                handler_path,
+                bundling=BundlingOptions(
+                    image=_lambda.Runtime.PYTHON_3_11.bundling_image,
+                    command=[
+                        "bash",
+                        "-c",
+                        "pip install -r requirements.txt -t /asset-output "
+                        "&& cp -r /asset-input/. /asset-output/",
+                    ],
+                ),
+            )
+
         fn = _lambda.Function(
             self,
             construct_id,
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler="handler.handler",
-            code=_lambda.Code.from_asset(handler_path),
+            code=code,
             memory_size=memory_size,
             timeout=Duration.minutes(timeout_minutes),
             environment=environment,
