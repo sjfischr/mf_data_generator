@@ -31,6 +31,7 @@ stepfunctions_stack = StepFunctionsStack(
     qc_validator=lambda_stack.qc_validator,
     assembler=lambda_stack.assembler,
     t12_generator=lambda_stack.t12_generator,
+    lender_narrative_generator=lambda_stack.lender_narrative_generator,
     section_lambdas=lambda_stack.section_lambdas,
     topic=storage_stack.topic,
 )

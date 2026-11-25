@@ -67,3 +67,17 @@ This document defines the consistency rules between the crosswalk-data.json
 | In-place rents | crosswalk.financial_data.in_place_rents_monthly | Rent Roll monthly rent column |
 | Market rents | crosswalk.financial_data.market_rents_monthly | Rent Roll market rent column |
 | Occupied unit count | From rent roll rows with status != Vacant | Must equal occupied_units |
+
+## Lender and T-12 Consistency
+
+| Data Point | Source | Must Match In |
+|---|---|---|
+| Year 1 EGI / OpEx / NOI / NCF | crosswalk.operating_history.year_1 | T-12 Year 1 and Lender Narrative |
+| Year 2 EGI / OpEx / NOI / NCF | crosswalk.operating_history.year_2 | T-12 Year 2 and Lender Narrative |
+| Year 3 EGI / OpEx / NOI / NCF | crosswalk.operating_history.year_3 | T-12 Year 3 and Lender Narrative |
+| Underwritten EGI / OpEx / NOI / NCF | crosswalk.operating_history.underwritten | Lender Narrative and loan-sizing calculations |
+| Loan amount | crosswalk.financing.loan_amount | Narrative Loan Summary, Sources & Uses, and DSCR/LTV test |
+| Underwritten DSCR | crosswalk.financing.underwritten_dscr | Lender Narrative and tier minimum test |
+| Underwriting value | crosswalk.financing.underwriting_value | Narrative and LTV test |
+| Sponsorship net worth/liquidity | crosswalk.sponsorship | Narrative sponsor analysis |
+| Appraisal report value | crosswalk.third_party_reports.appraisal.value | Final market value |

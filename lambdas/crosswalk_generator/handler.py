@@ -17,7 +17,8 @@ import textwrap
 from strands import Agent
 from strands.models.bedrock import BedrockModel
 
-from lambdas.shared.models import CrosswalkData
+from lambdas.shared.models import CrosswalkData, CrosswalkDraft
+from lambdas.shared.underwriting import finalize_crosswalk
 from lambdas.shared import s3_utils
 from lambdas.shared.agent_tools import (
     compute_financial_metrics,
@@ -31,6 +32,10 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 REGION = os.environ.get("AWS_REGION", "us-east-1")
+
+
+class CrosswalkGenerationError(RuntimeError):
+    """Raised when a crosswalk cannot be produced or validated."""
 
 SYSTEM_PROMPT = textwrap.dedent("""\
 You are a commercial real estate data specialist generating complete, realistic
@@ -126,6 +131,32 @@ def _build_crosswalk_schema_description() -> str:
       final_value_conclusion:
         market_value (int), value_per_unit (int), value_per_sf (float),
         effective_date (str)
+
+    operating_year1:
+      Year 1 detailed operating statement using Fannie Mae categories:
+      gpr, loss_gain_to_lease, vacancy, concessions, bad_debt,
+      non_revenue_units, laundry_vending, parking, commercial, other_income,
+      real_estate_taxes, insurance, utilities, water_sewer,
+      repairs_maintenance, payroll_benefits, general_administrative,
+      marketing, professional_fees, management_fee, ground_rent,
+      other_expenses, replacement_reserves.
+
+    financing_inputs:
+      loan_purpose, execution, product, tier, note_rate, term_months,
+      amortization_months, interest_only_months, prepayment_terms,
+      purchase_price, purchase_date, closing_costs, borrower_cash.
+
+    history_assumptions:
+      annual_income_growth_percent, annual_expense_growth_percent,
+      and optional one-off expense events.
+
+    sponsorship:
+      fictitious borrower_name, borrower_type, key_principals,
+      guarantor, and property_management.
+
+    third_party_reports:
+      fictitious appraisal, property condition, environmental, seismic,
+      and zoning summary data.
     """)
 
 
@@ -219,7 +250,7 @@ def _create_crosswalk_agent() -> Agent:
     model = BedrockModel(
         model_id="us.anthropic.claude-haiku-4-5-20251001-v1:0",
         region_name=REGION,
-        max_tokens=8192,
+        max_tokens=16000,
         temperature=0.3,
     )
 
@@ -265,10 +296,12 @@ def handler(event, context):
         #   - Pydantic schema → tool spec conversion
         #   - JSON extraction from agent response
         #   - Pydantic validation with auto-retry on failure
-        result = agent(prompt, structured_output_model=CrosswalkData)
-        crosswalk = CrosswalkData.model_validate(
+        result = agent(prompt, structured_output_model=CrosswalkDraft)
+        draft = CrosswalkDraft.model_validate(
             result.structured_output.model_dump()  # type: ignore[union-attr]
         )
+        draft.job_id = job_id
+        crosswalk = finalize_crosswalk(draft)
 
         # Force the correct job_id in case the model changed it
         crosswalk.job_id = job_id
@@ -284,11 +317,9 @@ def handler(event, context):
 
     except Exception as exc:
         logger.error("Crosswalk generation failed: %s", exc)
-        return {
-            "status": "error",
-            "job_id": job_id,
-            "error": f"Crosswalk generation failed: {exc}",
-        }
+        raise CrosswalkGenerationError(
+            f"Crosswalk generation failed: {exc}"
+        ) from exc
 
     # ------------------------------------------------------------------
     # 3. Business-logic warnings (non-fatal)

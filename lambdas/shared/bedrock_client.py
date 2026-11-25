@@ -7,6 +7,7 @@ import logging
 import os
 
 import boto3
+from lambdas.shared.errors import TransientError, wrap_transient
 
 logger = logging.getLogger(__name__)
 
@@ -63,12 +64,18 @@ def invoke_model(
 
     logger.info("Invoking model %s", model_id)
 
-    response = client.invoke_model(
-        modelId=model_id,
-        contentType="application/json",
-        accept="application/json",
-        body=json.dumps(body),
-    )
+    try:
+        response = client.invoke_model(
+            modelId=model_id,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps(body),
+        )
+    except Exception as exc:
+        wrapped = wrap_transient(exc)
+        if isinstance(wrapped, TransientError):
+            raise wrapped from exc
+        raise
 
     result = json.loads(response["body"].read())
     return result["content"][0]["text"]

@@ -169,6 +169,21 @@ def handler(event, context):
         if error_message:
             result["error"] = error_message
 
+        try:
+            qc_report = s3_utils.read_json(job_id, "qc_report.json")
+            result["qc"] = {
+                "status": qc_report.get("status", "").upper(),
+                "error_count": qc_report.get("error_count", 0),
+                "warning_count": qc_report.get("warning_count", 0),
+                "errors": [
+                    issue.get("description", "")
+                    for issue in qc_report.get("issues", [])
+                    if issue.get("severity") == "error"
+                ][:5],
+            }
+        except Exception:
+            pass
+
         return _status_response(200, result)
 
     except Exception as e:

@@ -19,7 +19,8 @@ flowchart TD
     CW --> FANOUT{{"Parallel fan‑out"}}
     FANOUT --> SEC["Section Generators 1–12<br/>Haiku / Sonnet / Opus"]
     FANOUT --> T12["T‑12 &amp; Rent Roll<br/>openpyxl"]
-    FANOUT --> IMG["Image Generator<br/>Haiku concept → Sonnet prompts → Krea 2 Large"]
+    FANOUT --> IMG["Image Generator<br/>Haiku concept → Sonnet prompts → Krea 2 Turbo"]
+    FANOUT --> LN["Lender Narrative / TAM<br/>Opus → DOCX"]
 
     SEC --> QC["QC Validator (Sonnet)<br/>consistency checks"]
     T12 --> QC
@@ -68,7 +69,7 @@ sequenceDiagram
 | 2 | **Crosswalk Generator** | Claude Haiku + arithmetic tools | Produces the master `crosswalk-data.json` — the single source of truth every downstream stage reads from |
 | 3 | **Section Generators (×12)** | Haiku / Sonnet / Opus | Generate the 12 narrative appraisal sections in parallel |
 | 3 | **T‑12 / Rent Roll** | openpyxl | Builds Excel operating statements and rent rolls from the crosswalk |
-| 3 | **Image Generator** | Haiku → Sonnet → Krea 2 Large | Establishes one architectural concept, generates 30 structured prompts, renders a consistent photo package |
+| 3 | **Image Generator** | Haiku → Sonnet → Krea 2 Turbo | Establishes one architectural concept, generates 30 structured prompts, renders a consistent photo package |
 | 4 | **QC Validator** | Claude Sonnet | Cross-checks arithmetic and narrative consistency against the crosswalk |
 | 5 | **Document Assembler** | Pandoc + python-docx | Assembles the final DOCX and bundles all deliverables into a ZIP |
 | 6 | **Download Handler** | — | Returns presigned S3 URLs for the finished package |
@@ -102,13 +103,13 @@ Consistency is the hard part of an AI photo package: 30 independently generated 
 flowchart LR
     CW[("crosswalk-data.json")] --> C["1 Architectural concept<br/>(Haiku)<br/>materials, roofline, palette,<br/>landscaping, window style"]
     C --> P["2 Structured prompts (Sonnet)<br/>30 prompts sharing one concept"]
-    P --> K["3 Krea 2 Large<br/>renders each shot<br/>creativity: low"]
+    P --> K["3 Krea 2 Turbo<br/>renders each shot<br/>deterministic seeds"]
     K --> S3[("S3 images/ + manifest.json")]
 ```
 
 1. **Architectural concept (Haiku)** — one pass establishes a single, concrete visual identity for the property (exterior materials, color palette, roofline, window style, landscaping theme, site features).
 2. **Structured prompts (Sonnet)** — all 30 prompts are generated in one call, each threaded through the shared concept, using a fixed 7‑section structure (Subject, Architecture details, Landscaping, Lighting/atmosphere, Camera, Style tags, Negative prompt suggestions).
-3. **Rendering (Krea 2 Large)** — each prompt is rendered at low `creativity` to minimize drift, keeping garden-style properties consistently garden-style, high-rise consistently high-rise.
+3. **Rendering (Krea 2 Turbo)** — each prompt is rendered at fal.ai with deterministic seeds and prompt expansion disabled, keeping garden-style properties consistently garden-style, high-rise consistently high-rise.
 
 See [templates/image_prompts.md](templates/image_prompts.md) for the shot list and prompt structure.
 
@@ -123,7 +124,7 @@ See [templates/image_prompts.md](templates/image_prompts.md) for the shot list a
 | Orchestration | AWS Step Functions |
 | Compute | AWS Lambda (Python 3.11) |
 | AI Models | AWS Bedrock (Claude Haiku, Sonnet 5, Opus 5 via cross-region inference profiles) |
-| Images | Replicate API (Krea 2 Large) |
+| Images | fal.ai (Krea 2 Turbo) |
 | Storage | Amazon S3 |
 | Notifications | Amazon SNS |
 | IaC | AWS CDK v2 (Python) |
@@ -140,7 +141,7 @@ See [templates/image_prompts.md](templates/image_prompts.md) for the shot list a
 - AWS CLI configured with appropriate credentials
 - AWS CDK CLI (`npm install -g aws-cdk`)
 - Pandoc installed
-- Replicate API token
+- fal.ai API key (`FAL_KEY`)
 - Bedrock access to the Claude Sonnet and Opus cross-region inference profiles
 
 ### Setup
@@ -202,7 +203,7 @@ mf_data_generator/
 │   ├── input_validator/          # Validates user input
 │   ├── crosswalk_generator/      # Generates master data (CRITICAL)
 │   ├── section_generators/       # 12 appraisal sections (see mapping above)
-│   ├── image_generator/          # Krea 2 Large image generation
+│   ├── image_generator/          # Krea 2 Turbo image generation
 │   ├── t12_generator/            # Excel T-12 and rent roll
 │   ├── qc_validator/             # Data consistency checks
 │   ├── assembler/                # DOCX assembly + ZIP
@@ -236,7 +237,7 @@ mf_data_generator/
 |----------|-------------|
 | `AWS_ACCOUNT_ID` | AWS account ID |
 | `AWS_REGION` | AWS region (default: `us-east-1`) |
-| `REPLICATE_API_TOKEN` | Replicate API key for image generation |
+| `FAL_KEY` | fal.ai API key for Krea 2 Turbo image generation |
 | `S3_BUCKET` | S3 bucket name |
 | `BEDROCK_SONNET_MODEL_ARN` | Bedrock inference-profile ARN for Claude Sonnet |
 | `BEDROCK_OPUS_MODEL_ARN` | Bedrock inference-profile ARN for Claude Opus |
@@ -256,7 +257,7 @@ The `deploy-backend.yml` and `deploy-frontend.yml` workflows read these from **r
 | Secret | Used by | Description |
 |--------|---------|--------------|
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | backend | AWS credentials for `cdk deploy` |
-| `REPLICATE_API_TOKEN` | backend | Replicate API key |
+| `FAL_KEY` | backend | fal.ai API key |
 | `BEDROCK_SONNET_MODEL_ARN` | backend | Bedrock inference-profile ARN for Sonnet — **required**, CDK synth fails without it |
 | `BEDROCK_OPUS_MODEL_ARN` | backend | Bedrock inference-profile ARN for Opus — **required**, CDK synth fails without it |
 | `VITE_API_URL` | frontend | API Gateway base URL baked into the frontend build |

@@ -1,12 +1,14 @@
-"""Image Generator Lambda — generates property images via Replicate API."""
+"""Image Generator Lambda — generates property images via fal.ai Krea 2 Turbo."""
 
 import json
 import logging
 import os
 import textwrap
+import hashlib
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import replicate
+import fal_client
 import requests
 
 from lambdas.shared import bedrock_client, s3_utils
@@ -14,7 +16,7 @@ from lambdas.shared.models import CrosswalkData
 
 logger = logging.getLogger(__name__)
 
-REPLICATE_MODEL = "krea/krea-2-large"
+FAL_MODEL = "fal-ai/krea-2/turbo"
 MAX_WORKERS = 10
 
 # Model used for prompt generation. Sonnet is used instead of Haiku here because
@@ -23,7 +25,7 @@ MAX_WORKERS = 10
 PROMPT_MODEL = "sonnet"
 
 STRUCTURED_PROMPT_SYSTEM = textwrap.dedent("""\
-    You are a prompt generator for the Krea 2 Large image generation model. Given
+    You are a prompt generator for the Krea 2 Turbo image generation model. Given
     a shot description and a shared architectural concept for a property, output
     a structured prompt using the following exact section headers, in this exact
     order. Do not add commentary, disclaimers, or any text outside the structure
@@ -165,7 +167,7 @@ Return a JSON array of exactly 30 objects. Each object must have:
         prompt=prompt,
         model=PROMPT_MODEL,
         system_prompt=STRUCTURED_PROMPT_SYSTEM,
-        max_tokens=8192,
+        max_tokens=32000,
     )
 
     if isinstance(result, dict) and "prompts" in result:
@@ -182,22 +184,49 @@ Return a JSON array of exactly 30 objects. Each object must have:
 
 
 def generate_single_image(prompt_data: dict, job_id: str) -> dict:
-    """Generate a single image via Replicate and upload to S3."""
+    """Generate a single image via fal.ai and upload to S3."""
     filename = prompt_data["filename"]
     image_prompt = prompt_data["prompt"]
 
-    try:
-        output = replicate.run(
-            REPLICATE_MODEL,
-            input={
+    seed = int.from_bytes(
+        hashlib.sha256(f"{job_id}:{filename}".encode("utf-8")).digest()[:8],
+        "big",
+    ) % (2**31)
+
+    def render(attempt_seed: int):
+        return fal_client.run(
+            FAL_MODEL,
+            arguments={
                 "prompt": image_prompt,
-                "creativity": "low",
+                "seed": attempt_seed,
+                "image_size": "landscape_4_3",
+                "num_images": 1,
+                "acceleration": "none",
+                "enable_prompt_expansion": False,
+                "enable_safety_checker": True,
+                "output_format": "jpeg",
             },
         )
 
-        # Replicate returns a URL or list of URLs
-        image_url = output[0] if isinstance(output, list) else output
+    try:
+        output = render(seed)
+        nsfw = (output or {}).get("has_nsfw_concepts", [])
+        if nsfw and nsfw[0]:
+            output = render(seed + 1)
+            nsfw = (output or {}).get("has_nsfw_concepts", [])
+            if nsfw and nsfw[0]:
+                return {
+                    "filename": filename,
+                    "description": prompt_data.get("description", ""),
+                    "status": "failed",
+                    "reason": "safety_filter",
+                    "error": "fal.ai safety filter flagged the render twice",
+                }
 
+        images = (output or {}).get("images", [])
+        if not images:
+            raise RuntimeError("fal.ai returned no images")
+        image_url = images[0]["url"]
         response = requests.get(image_url, timeout=60)
         response.raise_for_status()
 
@@ -207,20 +236,20 @@ def generate_single_image(prompt_data: dict, job_id: str) -> dict:
             response.content,
             "image/jpeg",
         )
-
         return {
             "filename": filename,
             "description": prompt_data.get("description", ""),
             "s3_key": s3_key,
             "status": "success",
         }
-    except Exception as e:
-        logger.error("Failed to generate image %s: %s", filename, e)
+    except Exception as exc:
+        logger.error("Failed to generate image %s: %s", filename, exc)
         return {
             "filename": filename,
             "description": prompt_data.get("description", ""),
             "status": "failed",
-            "error": str(e),
+            "reason": "render_error",
+            "error": str(exc),
         }
 
 
@@ -228,8 +257,9 @@ def handler(event, context):
     job_id = event["job_id"]
     logger.info("Generating images for job %s", job_id)
 
-    if not os.environ.get("REPLICATE_API_TOKEN"):
-        raise RuntimeError("REPLICATE_API_TOKEN is not configured")
+    fal_key = os.environ.get("FAL_KEY") or os.environ.get("FAL_AI_API_TOKEN")
+    if not fal_key:
+        raise RuntimeError("FAL_KEY or FAL_AI_API_TOKEN is not configured")
 
     # Load crosswalk data
     data = s3_utils.read_json(job_id, "crosswalk-data.json")
@@ -237,6 +267,17 @@ def handler(event, context):
 
     # Generate customized prompts
     image_prompts = build_image_prompts(crosswalk)
+    if len(image_prompts) != 30:
+        logger.warning(
+            "Structured prompt count was %d; retrying once",
+            len(image_prompts),
+        )
+        image_prompts = build_image_prompts(crosswalk)
+    if len(image_prompts) != 30:
+        raise RuntimeError(
+            f"Krea 2 Turbo prompt generation returned {len(image_prompts)} "
+            "prompts; expected 30"
+        )
     logger.info("Generated %d image prompts", len(image_prompts))
 
     # Generate images in parallel

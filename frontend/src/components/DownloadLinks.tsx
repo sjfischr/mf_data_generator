@@ -100,30 +100,36 @@ export default function DownloadLinks({ jobId, onReset }: Props) {
   const { urls } = data;
 
   const files: FileEntry[] = [
-    {
+    ...(urls.appraisal ? [{
       label: 'Appraisal Report',
       type: 'DOCX',
       url: urls.appraisal,
-      icon: 'document',
-    },
-    {
+      icon: 'document' as IconKind,
+    }] : []),
+    ...(urls.lender_narrative ? [{
+      label: 'Lender Narrative',
+      type: 'DOCX',
+      url: urls.lender_narrative,
+      icon: 'document' as IconKind,
+    }] : []),
+    ...(urls.rent_roll ? [{
       label: 'Rent Roll',
       type: 'XLSX',
       url: urls.rent_roll,
-      icon: 'table',
-    },
-    ...urls.t12_files.map((url, i) => ({
-      label: `T-12 Statement ${i + 1}`,
+      icon: 'table' as IconKind,
+    }] : []),
+    ...(urls.t12_files ?? []).map((url, i) => ({
+      label: `T-12 — Year ${i + 1}`,
       type: 'XLSX' as const,
       url,
       icon: 'chart' as IconKind,
     })),
-    {
+    ...(urls.complete_package ? [{
       label: 'Complete Package',
       type: 'ZIP',
       url: urls.complete_package,
-      icon: 'archive',
-    },
+      icon: 'archive' as IconKind,
+    }] : []),
   ];
 
   return (

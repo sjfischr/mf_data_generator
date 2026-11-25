@@ -22,6 +22,7 @@ class StepFunctionsStack(Stack):
         qc_validator: _lambda.IFunction,
         assembler: _lambda.IFunction,
         t12_generator: _lambda.IFunction,
+        lender_narrative_generator: _lambda.IFunction,
         section_lambdas: dict[str, _lambda.IFunction],
         topic: sns.ITopic,
         **kwargs,
@@ -30,9 +31,15 @@ class StepFunctionsStack(Stack):
 
         # Standard retry configuration for Lambda tasks
         retry_config = {
-            "errors": ["Lambda.ServiceException", "Lambda.TooManyRequestsException", "States.TaskFailed"],
-            "interval": Duration.seconds(2),
-            "max_attempts": 2,
+            "errors": [
+                "TransientError",
+                "Lambda.ServiceException",
+                "Lambda.AWSLambdaException",
+                "Lambda.SdkClientException",
+                "Lambda.TooManyRequestsException",
+            ],
+            "interval": Duration.seconds(5),
+            "max_attempts": 3,
             "backoff_rate": 2.0,
         }
 
@@ -97,6 +104,15 @@ class StepFunctionsStack(Stack):
         generate_t12.add_retry(**retry_config)
         parallel_sections.branch(generate_t12)
 
+        generate_lender_narrative = tasks.LambdaInvoke(
+            self,
+            "GenerateLenderNarrative",
+            lambda_function=lender_narrative_generator,
+            output_path="$.Payload",
+        )
+        generate_lender_narrative.add_retry(**retry_config)
+        parallel_sections.branch(generate_lender_narrative)
+
         parallel_sections.add_catch(notify_error_state, result_path="$.error")
 
         # --- Step 4: Image Generation ---
@@ -107,7 +123,7 @@ class StepFunctionsStack(Stack):
             output_path="$.Payload",
         )
         generate_images.add_retry(**retry_config)
-        generate_images.add_catch(notify_error_state, result_path="$.error")
+        parallel_sections.branch(generate_images)
 
         # --- Step 5: QC Validation ---
         run_qc = tasks.LambdaInvoke(
@@ -156,7 +172,6 @@ class StepFunctionsStack(Stack):
             validate_input
             .next(generate_crosswalk)
             .next(parallel_sections)
-            .next(generate_images)
             .next(run_qc)
             .next(qc_choice)
         )
@@ -167,7 +182,7 @@ class StepFunctionsStack(Stack):
             "AppraisalPipelineStateMachine",
             state_machine_name="AppraisalPipelineStateMachine",
             definition_body=sfn.DefinitionBody.from_chainable(definition),
-            timeout=Duration.minutes(15),
+            timeout=Duration.minutes(45),
         )
 
 

@@ -3,8 +3,13 @@
 import json
 import logging
 import re
+import io
 
-from lambdas.shared import bedrock_client, s3_utils
+from openpyxl import load_workbook
+from docx import Document
+from lambdas.shared.chart_of_accounts import CHART_OF_ACCOUNTS
+
+from lambdas.shared import s3_utils
 from lambdas.shared.models import CrosswalkData
 
 logger = logging.getLogger(__name__)
@@ -139,6 +144,167 @@ def run_section_content_checks(crosswalk: CrosswalkData, job_id: str) -> list[di
     return issues
 
 
+def run_new_deliverable_checks(crosswalk: CrosswalkData, job_id: str) -> list[dict]:
+    issues = []
+    s3 = s3_utils.get_s3_client()
+
+    if crosswalk.financing is not None:
+        financing = crosswalk.financing
+        if financing.underwritten_dscr + 1e-9 < financing.tier_minimum_dscr:
+            issues.append({
+                "severity": "error",
+                "category": "tier_dscr_mismatch",
+                "description": (
+                    f"Underwritten DSCR {financing.underwritten_dscr:.2f}x "
+                    f"below tier minimum {financing.tier_minimum_dscr:.2f}x"
+                ),
+                "location": "crosswalk-data.json",
+            })
+        if financing.ltv_underwriting_value > financing.tier_maximum_ltv:
+            issues.append({
+                "severity": "error",
+                "category": "tier_ltv_mismatch",
+                "description": (
+                    f"LTV {financing.ltv_underwriting_value:.2f}% "
+                    f"above tier maximum {financing.tier_maximum_ltv:.2f}%"
+                ),
+                "location": "crosswalk-data.json",
+            })
+
+    narrative_key = s3_utils.job_key(job_id, "outputs/lender_narrative.docx")
+    try:
+        response = s3.get_object(Bucket=s3_utils.BUCKET, Key=narrative_key)
+        doc = Document(io.BytesIO(response["Body"].read()))
+        headings = [
+            paragraph.text.strip()
+            for paragraph in doc.paragraphs
+            if paragraph.style.name.startswith("Heading")
+        ]
+        required = [
+            "1. Loan Summary & Salient Facts",
+            "2. Executive Summary & Recommendation",
+            "3. Sources & Uses",
+            "4. Borrower, Key Principals & Guarantor",
+            "5. Property Management",
+            "6. Property Description",
+            "7. Market & Submarket Analysis",
+            "8. Rent Roll & Occupancy Analysis",
+            "9. Historical Operating Performance vs. Underwriting",
+            "10. Underwritten NCF & Loan Sizing",
+            "11. Appraisal Review",
+            "12. Third-Party Reports",
+            "13. Refinance Risk Analysis",
+            "14. Strengths, Risks & Mitigants",
+            "15. Waivers & Exceptions",
+            "16. Conditions of Approval",
+            "17. Underwriter Conclusion & Approval",
+        ]
+        for heading in required:
+            if heading not in headings:
+                issues.append({
+                    "severity": "error",
+                    "category": "missing_narrative_heading",
+                    "description": f"Narrative missing heading: {heading}",
+                    "location": "lender_narrative.docx",
+                })
+    except Exception as exc:
+        issues.append({
+            "severity": "error",
+            "category": "missing_narrative",
+            "description": f"Cannot read lender narrative: {exc}",
+            "location": "lender_narrative.docx",
+        })
+
+    if crosswalk.financing is not None:
+        loan_amount = crosswalk.financing.loan_amount
+        try:
+            response = s3.get_object(Bucket=s3_utils.BUCKET, Key=narrative_key)
+            doc = Document(io.BytesIO(response["Body"].read()))
+            text = "\n".join(
+                paragraph.text for paragraph in doc.paragraphs
+            )
+            for table in doc.tables:
+                text += "\n" + "\n".join(
+                    cell.text
+                    for row in table.rows
+                    for cell in row.cells
+                )
+            formatted = f"${loan_amount:,}"
+            if formatted not in text:
+                issues.append({
+                    "severity": "error",
+                    "category": "missing_narrative_loan_amount",
+                    "description": f"Lender narrative missing loan amount {formatted}",
+                    "location": "lender_narrative.docx",
+                })
+        except Exception:
+            pass
+
+    for year_number in (1, 2, 3):
+        key = s3_utils.job_key(job_id, f"outputs/t12_year{year_number}.xlsx")
+        try:
+            response = s3.get_object(Bucket=s3_utils.BUCKET, Key=key)
+            wb = load_workbook(io.BytesIO(response["Body"].read()), data_only=False)
+            ws = wb.active
+            if ws is None:
+                raise RuntimeError("No worksheet")
+
+            if crosswalk.operating_history is not None:
+                column_name = f"year_{year_number}"
+                expected = getattr(crosswalk.operating_history, column_name)
+
+                account_totals = {}
+                account_map = {
+                    str(account[0]): account[2]
+                    for account in CHART_OF_ACCOUNTS
+                }
+                for row in range(5, ws.max_row + 1):
+                    label = str(ws.cell(row, 1).value or "")
+                    account_number = label.split(" ", 1)[0]
+                    category = account_map.get(account_number)
+                    if not category:
+                        continue
+                    monthly_total = sum(
+                        int(ws.cell(row, col).value or 0)
+                        for col in range(2, 14)
+                        if isinstance(ws.cell(row, col).value, (int, float))
+                    )
+                    account_totals[category] = (
+                        account_totals.get(category, 0) + monthly_total
+                    )
+
+                actual_egi = (
+                    account_totals.get("gpr", 0)
+                    + account_totals.get("loss_gain_to_lease", 0)
+                    - account_totals.get("vacancy", 0)
+                    - account_totals.get("concessions", 0)
+                    - account_totals.get("bad_debt", 0)
+                    - account_totals.get("non_revenue_units", 0)
+                    + account_totals.get("laundry_vending", 0)
+                    + account_totals.get("parking", 0)
+                    + account_totals.get("commercial", 0)
+                    + account_totals.get("other_income", 0)
+                )
+                if actual_egi != expected.effective_gross_income:
+                    issues.append({
+                        "severity": "error",
+                        "category": "t12_total_mismatch",
+                        "description": (
+                            f"t12_year{year_number}.xlsx EGI {actual_egi:,} "
+                            f"!= crosswalk EGI {expected.effective_gross_income:,}"
+                        ),
+                        "location": f"t12_year{year_number}.xlsx",
+                    })
+        except Exception as exc:
+            issues.append({
+                "severity": "error",
+                "category": "missing_t12",
+                "description": f"Cannot read t12_year{year_number}.xlsx: {exc}",
+                "location": f"t12_year{year_number}.xlsx",
+            })
+    return issues
+
+
 def handler(event, context):
     job_id = event["job_id"]
     logger.info("Running QC validation for job %s", job_id)
@@ -157,10 +323,14 @@ def handler(event, context):
     content_issues = run_section_content_checks(crosswalk, job_id)
     all_issues.extend(content_issues)
 
+    # New deliverable checks
+    deliverable_issues = run_new_deliverable_checks(crosswalk, job_id)
+    all_issues.extend(deliverable_issues)
+
     # Determine pass/fail
     errors = [i for i in all_issues if i["severity"] == "error"]
     warnings = [i for i in all_issues if i["severity"] == "warning"]
-    total_checks = 50  # approximate number of checks performed
+    total_checks = 50 + len(all_issues) + 17 + 3
     checks_passed = total_checks - len(all_issues)
 
     status = "fail" if errors else "pass"
