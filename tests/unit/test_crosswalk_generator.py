@@ -151,3 +151,46 @@ class TestCrosswalkGenerator:
             return_value='Here is the result:\n```json\n{"status":"ok"}\n```\n',
         )
         assert bedrock_client.invoke_model_json("prompt") == {"status": "ok"}
+
+    def test_normalize_draft_aliases(self):
+        from lambdas.crosswalk_generator.handler import _normalize_draft_data
+
+        payload = {
+            "market_data": {
+                "comparable_sales": [
+                    {"sale_price": 100, "units": 3, "price_per_unit": 999},
+                ]
+            },
+            "sponsorship": {
+                "key_principals": [{
+                    "name": "Test",
+                    "title": "Managing Partner",
+                    "experience_years": 12,
+                }],
+                "property_management": {
+                    "company_name": "Test Management",
+                    "fee_percent": 4.5,
+                },
+            },
+            "third_party_reports": {
+                "appraisal": {
+                    "appraiser_name": "Test Appraiser",
+                    "appraisal_date": "2026-01-10",
+                    "appraisal_value": 1000000,
+                },
+                "property_condition": {
+                    "inspector": "Test PCA",
+                    "inspection_date": "2026-01-10",
+                    "deferred_maintenance": 50000,
+                },
+                "environmental": {"findings": "No recognized conditions"},
+                "seismic": {"retrofit_required": False},
+                "zoning": {"zoning_classification": "Conforming"},
+            },
+            "financing_inputs": {"tier": "Tier 1"},
+        }
+        normalized = _normalize_draft_data(payload)
+        assert normalized["market_data"]["comparable_sales"][0]["price_per_unit"] == 33
+        assert normalized["sponsorship"]["key_principals"][0]["role"] == "Managing Partner"
+        assert normalized["third_party_reports"]["appraisal"]["firm"] == "Test Appraiser"
+        assert normalized["financing_inputs"]["tier"] == "Tier 2"

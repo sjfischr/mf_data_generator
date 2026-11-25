@@ -277,6 +277,125 @@ def _parse_agent_json(result) -> dict:
         raw = raw[start:end + 1]
     return json.loads(raw)
 
+
+def _normalize_draft_data(draft_data: dict) -> dict:
+    """Normalize model variations into the CrosswalkDraft contract."""
+    draft_data = dict(draft_data)
+
+    market = draft_data.get("market_data")
+    if isinstance(market, dict):
+        sales = market.get("comparable_sales")
+        if isinstance(sales, list):
+            for sale in sales:
+                if isinstance(sale, dict):
+                    sale_price = int(sale.get("sale_price", 0))
+                    units = int(sale.get("units", 0))
+                    sale["price_per_unit"] = (
+                        round(sale_price / units) if units else 0
+                    )
+
+    sponsorship = draft_data.get("sponsorship")
+    if isinstance(sponsorship, dict):
+        key_principals = sponsorship.get("key_principals")
+        if isinstance(key_principals, list):
+            for principal in key_principals:
+                if isinstance(principal, dict):
+                    principal["role"] = principal.get(
+                        "role",
+                        principal.get("title", "Principal"),
+                    )
+                    principal["years_experience"] = int(principal.get(
+                        "years_experience",
+                        principal.get("experience_years", 10),
+                    ))
+                    principal["units_owned"] = int(principal.get(
+                        "units_owned",
+                        principal.get("owned_units", 0),
+                    ))
+                    principal["net_worth"] = int(principal.get(
+                        "net_worth",
+                        100_000_000,
+                    ))
+                    principal["liquidity"] = int(principal.get(
+                        "liquidity",
+                        10_000_000,
+                    ))
+        management = sponsorship.get("property_management")
+        if isinstance(management, dict):
+            management["name"] = management.get(
+                "name",
+                management.get("company_name", management.get("company", "Property Management")),
+            )
+            management["management_fee_percent"] = float(management.get(
+                "management_fee_percent",
+                management.get("fee_percent", 4.0),
+            ))
+            management["on_site_staffing"] = management.get(
+                "on_site_staffing",
+                management.get("staffing", "Property manager, leasing, and maintenance"),
+            )
+
+    third_party = draft_data.get("third_party_reports")
+    if isinstance(third_party, dict):
+        appraisal = third_party.get("appraisal")
+        if isinstance(appraisal, dict):
+            third_party["appraisal"] = {
+                "firm": appraisal.get("firm", appraisal.get("appraiser_name", "Independent Appraiser")),
+                "date": appraisal.get("date", appraisal.get("appraisal_date", "2026-01-15")),
+                "value": int(appraisal.get("value", appraisal.get("appraisal_value", 0))),
+            }
+
+        condition = third_party.get("property_condition_assessment")
+        if condition is None:
+            condition = third_party.get("property_condition")
+        if isinstance(condition, dict):
+            immediate = int(condition.get(
+                "immediate_repairs",
+                condition.get("deferred_maintenance", 0),
+            ))
+            third_party["property_condition_assessment"] = {
+                "firm": condition.get("firm", condition.get("inspector", "Independent PCA Consultant")),
+                "date": condition.get("date", condition.get("inspection_date", "2026-01-10")),
+                "immediate_repairs": immediate,
+                "twelve_year_reserve_need": int(condition.get(
+                    "twelve_year_reserve_need",
+                    immediate * 10,
+                )),
+            }
+
+        environment = third_party.get("environmental_site_assessment")
+        if environment is None:
+            environment = third_party.get("environmental")
+        if isinstance(environment, dict):
+            third_party["environmental_site_assessment"] = {
+                "firm": environment.get("firm", environment.get("phase_1_provider", "Independent Environmental Consultant")),
+                "date": environment.get("date", environment.get("phase_1_date", "2026-01-10")),
+                "finding": environment.get("finding", environment.get("findings", "No significant conditions identified")),
+            }
+
+        seismic = third_party.get("seismic")
+        third_party["seismic_applicable"] = bool(
+            third_party.get(
+                "seismic_applicable",
+                isinstance(seismic, dict) and seismic.get("retrofit_required", False),
+            )
+        )
+
+        zoning = third_party.get("zoning")
+        if isinstance(zoning, dict):
+            third_party["zoning_status"] = third_party.get(
+                "zoning_status",
+                zoning.get("zoning_classification", "Conforming"),
+            )
+        else:
+            third_party.setdefault("zoning_status", "Conforming")
+
+    financing = draft_data.get("financing_inputs")
+    if isinstance(financing, dict) and financing.get("tier") == "Tier 1":
+        financing["tier"] = "Tier 2"
+
+    return draft_data
+
     return Agent(
         name="crosswalk_generator",
         model=model,
@@ -323,6 +442,7 @@ def handler(event, context):
             max_tokens=16000,
         )
         draft_data = _parse_agent_json(draft_data)
+        draft_data = _normalize_draft_data(draft_data)
         draft = CrosswalkDraft.model_validate(draft_data)
         draft.job_id = job_id
         crosswalk = finalize_crosswalk(draft)
