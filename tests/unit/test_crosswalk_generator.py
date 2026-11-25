@@ -142,3 +142,12 @@ class TestCrosswalkGenerator:
 
         payload = {"property_name": "Test"}
         assert _parse_agent_json(payload) is payload
+
+    def test_invoke_model_json_extracts_embedded_object(self, mocker):
+        from lambdas.shared import bedrock_client
+
+        mocker.patch(
+            "lambdas.shared.bedrock_client.invoke_model",
+            return_value='Here is the result:\n```json\n{"status":"ok"}\n```\n',
+        )
+        assert bedrock_client.invoke_model_json("prompt") == {"status": "ok"}

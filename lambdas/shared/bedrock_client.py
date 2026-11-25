@@ -116,4 +116,19 @@ def invoke_model_json(
             lines = lines[:-1]
         text = "\n".join(lines)
 
+    text = text.strip()
+    if not text:
+        raise ValueError("Bedrock returned an empty JSON response")
+
+    # Models sometimes add a short preamble or return the JSON as a fenced block.
+    # Extract the first complete JSON object/array embedded in the response.
+    starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
+    if starts:
+        start = min(starts)
+        opener = text[start]
+        closer = "}" if opener == "{" else "]"
+        end = text.rfind(closer)
+        if end >= start:
+            text = text[start:end + 1]
+
     return json.loads(text)
