@@ -130,3 +130,9 @@ class TestCrosswalkGenerator:
 
         # Occupancy units add up
         assert data.validate_occupancy_units()
+
+    def test_parse_agent_json_from_markdown_fence(self):
+        from lambdas.crosswalk_generator.handler import _parse_agent_json
+
+        raw = '```json\n{"property_name":"Test"}\n```'
+        assert _parse_agent_json(raw) == {"property_name": "Test"}

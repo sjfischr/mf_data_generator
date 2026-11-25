@@ -254,6 +254,27 @@ def _create_crosswalk_agent() -> Agent:
         temperature=0.3,
     )
 
+
+def _parse_agent_json(result) -> dict:
+    """Extract a JSON object from a Strands 1.x AgentResult."""
+    if hasattr(result, "structured_output"):
+        return result.structured_output.model_dump()
+
+    raw = str(result).strip()
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        raw = "\n".join(lines).strip()
+
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        raw = raw[start:end + 1]
+    return json.loads(raw)
+
     return Agent(
         name="crosswalk_generator",
         model=model,
@@ -296,10 +317,9 @@ def handler(event, context):
         #   - Pydantic schema → tool spec conversion
         #   - JSON extraction from agent response
         #   - Pydantic validation with auto-retry on failure
-        result = agent(prompt, structured_output_model=CrosswalkDraft)
-        draft = CrosswalkDraft.model_validate(
-            result.structured_output.model_dump()  # type: ignore[union-attr]
-        )
+        result = agent(prompt)
+        draft_data = _parse_agent_json(result)
+        draft = CrosswalkDraft.model_validate(draft_data)
         draft.job_id = job_id
         crosswalk = finalize_crosswalk(draft)
 
