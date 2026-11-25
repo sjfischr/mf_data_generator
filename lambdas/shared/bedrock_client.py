@@ -7,6 +7,7 @@ import logging
 import os
 
 import boto3
+from botocore.config import Config
 from lambdas.shared.errors import TransientError, wrap_transient
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,12 @@ _client = None
 def get_bedrock_client():
     global _client
     if _client is None:
-        _client = boto3.client("bedrock-runtime", region_name=REGION)
+        # Long generations (structured prompts, memo prose) exceed botocore's 60s default.
+        _client = boto3.client(
+            "bedrock-runtime",
+            region_name=REGION,
+            config=Config(read_timeout=900, connect_timeout=10, retries={"max_attempts": 4, "mode": "adaptive"}),
+        )
     return _client
 
 

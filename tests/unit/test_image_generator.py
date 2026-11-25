@@ -54,3 +54,29 @@ def test_safety_filter_retries_once(mock_run, mock_get, mock_write):
     assert result["status"] == "failed"
     assert result["reason"] == "safety_filter"
     assert mock_run.call_count == 2
+
+def _fake_batch(**kwargs):
+    import re
+    count = int(re.search(r"generate exactly (\d+)", kwargs["prompt"]).group(1))
+    prefix = re.search(r'Prefix every filename with "(\w+)_"', kwargs["prompt"]).group(1)
+    return [{"filename": f"{prefix}_shot_{i}.jpg", "description": "d", "subject": "s"} for i in range(count)]
+
+
+def test_build_image_prompts_batches_to_thirty(finalized_crosswalk, mocker):
+    mocker.patch.object(image_handler, "generate_architectural_concept", return_value={"style": "craftsman"})
+    invoke = mocker.patch.object(image_handler.bedrock_client, "invoke_model_json", side_effect=_fake_batch)
+    prompts = image_handler.build_image_prompts(finalized_crosswalk)
+    assert len(prompts) == 30 and invoke.call_count == 3
+    assert len({p["filename"] for p in prompts}) == 30
+    assert all("Subject: s" in p["prompt"] for p in prompts)
+
+
+def test_short_prompt_batch_retries_then_fails(finalized_crosswalk, mocker):
+    import pytest
+
+    mocker.patch.object(image_handler, "generate_architectural_concept", return_value={})
+    invoke = mocker.patch.object(image_handler.bedrock_client, "invoke_model_json",
+                                 return_value=[{"filename": "a.jpg", "subject": "s"}])
+    with pytest.raises(RuntimeError, match="returned 1 prompts; expected 10"):
+        image_handler._generate_batch(finalized_crosswalk, {}, image_handler.SHOT_BATCHES[0])
+    assert invoke.call_count == 2

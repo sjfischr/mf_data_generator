@@ -117,24 +117,31 @@ def _assemble_structured_prompt(item: dict) -> str:
     )
 
 
-def build_image_prompts(crosswalk: CrosswalkData) -> list[dict]:
-    """Generate 30 structured, mutually-consistent image prompts.
+SHOT_BATCHES = [
+    ("exterior", "6 exterior views (aerial, street frontage, entrance/signage area, building elevations) "
+                 "and 4 amenity views", 10),
+    ("interior", "10 unit interior views across the unit types (living, kitchen, bedroom, bath)", 10),
+    ("site", "2 more amenity views, 2 more unit interiors, and 6 site/surroundings views "
+             "(parking, landscaping, walkways, neighborhood context)", 10),
+]
+PROMPT_COUNT = sum(count for _, _, count in SHOT_BATCHES)
 
-    First establishes a shared architectural concept for the property, then
-    generates all 30 structured prompts in a single call so the model can keep
-    them consistent with each other and with the shared concept.
-    """
+
+def _prompt_items(result) -> list[dict]:
+    if isinstance(result, dict):
+        result = result.get("prompts") or next((v for v in result.values() if isinstance(v, list)), [])
+    return [item for item in result if isinstance(item, dict)] if isinstance(result, list) else []
+
+
+def _generate_batch(crosswalk: CrosswalkData, concept: dict, batch: tuple[str, str, int]) -> list[dict]:
+    """Generate one batch of structured prompts that all reuse the shared concept."""
+    name, shots, count = batch
     prop = crosswalk.property_identification
     phys = crosswalk.property_physical
-
     unit_sizes = {u.unit_type: u.avg_size_sf for u in phys.unit_mix}
-
-    concept = generate_architectural_concept(crosswalk)
-    logger.info("Architectural concept: %s", json.dumps(concept))
-
-    prompt = f"""Using the shared architectural concept below, generate exactly 30
+    prompt = f"""Using the shared architectural concept below, generate exactly {count}
 structured image prompts for a commercial real estate appraisal photo package:
-6 exterior views, 6 amenity views, 12 unit interiors, 6 site/surroundings.
+{shots}. Prefix every filename with "{name}_".
 
 Shared architectural concept (reuse these details consistently in every prompt):
 {json.dumps(concept, indent=2)}
@@ -151,35 +158,55 @@ Property details:
 - Amenities: {', '.join(phys.amenities)}
 - Unit sizes: {json.dumps(unit_sizes)}
 
-Return a JSON array of exactly 30 objects. Each object must have:
-- "filename": descriptive filename like "aerial_view.jpg"
+Return a JSON array of exactly {count} objects. Each object must have:
+- "filename": descriptive filename like "{name}_aerial_view.jpg"
 - "description": short description for the image manifest
-- "subject": the Subject section content
-- "architecture_details": the Architecture details section content
-- "landscaping": the Landscaping section content
-- "lighting_atmosphere": the Lighting/atmosphere section content
-- "camera": the Camera section content
-- "style_tags": the Style tags section content
-- "negative_prompt_suggestions": the Negative prompt suggestions section content
+- "subject", "architecture_details", "landscaping", "lighting_atmosphere",
+  "camera", "style_tags", "negative_prompt_suggestions": the structured sections
 """
+    items: list[dict] = []
+    for attempt in range(2):
+        result = bedrock_client.invoke_model_json(
+            prompt=prompt,
+            model=PROMPT_MODEL,
+            system_prompt=STRUCTURED_PROMPT_SYSTEM,
+            max_tokens=12000,
+        )
+        items = [i for i in _prompt_items(result) if i.get("filename") and i.get("subject")]
+        if len(items) >= count:
+            return items[:count]
+        logger.warning("Batch %s returned %d prompts (attempt %d); retrying", name, len(items), attempt + 1)
+    raise RuntimeError(f"Krea 2 Turbo prompt batch '{name}' returned {len(items)} prompts; expected {count}")
 
-    result = bedrock_client.invoke_model_json(
-        prompt=prompt,
-        model=PROMPT_MODEL,
-        system_prompt=STRUCTURED_PROMPT_SYSTEM,
-        max_tokens=32000,
-    )
 
-    if isinstance(result, dict) and "prompts" in result:
-        items = result["prompts"]
-    elif isinstance(result, list):
-        items = result
-    else:
-        items = result
+def build_image_prompts(crosswalk: CrosswalkData) -> list[dict]:
+    """Generate 30 structured, mutually consistent image prompts.
 
-    for item in items:
+    One architectural concept is established first and threaded through three
+    concurrent prompt batches, keeping every shot visually consistent while
+    keeping each model call short.
+    """
+    concept = generate_architectural_concept(crosswalk)
+    logger.info("Architectural concept: %s", json.dumps(concept))
+
+    with ThreadPoolExecutor(max_workers=len(SHOT_BATCHES)) as pool:
+        batches = list(pool.map(lambda b: _generate_batch(crosswalk, concept, b), SHOT_BATCHES))
+
+    items: list[dict] = []
+    seen: set[str] = set()
+    for item in (i for batch in batches for i in batch):
+        filename = str(item["filename"]).strip().replace(" ", "_")
+        if not filename.lower().endswith((".jpg", ".jpeg")):
+            filename += ".jpg"
+        while filename in seen:
+            filename = filename.replace(".jpg", "_2.jpg")
+        seen.add(filename)
+        item["filename"] = filename
+        for key in ("architecture_details", "landscaping", "lighting_atmosphere", "camera",
+                    "style_tags", "negative_prompt_suggestions"):
+            item.setdefault(key, "")
         item["prompt"] = _assemble_structured_prompt(item)
-
+        items.append(item)
     return items
 
 
@@ -265,18 +292,11 @@ def handler(event, context):
     data = s3_utils.read_json(job_id, "crosswalk-data.json")
     crosswalk = CrosswalkData.model_validate(data)
 
-    # Generate customized prompts
+    # Generate structured prompts (each batch validates and retries its own count)
     image_prompts = build_image_prompts(crosswalk)
-    if len(image_prompts) != 30:
-        logger.warning(
-            "Structured prompt count was %d; retrying once",
-            len(image_prompts),
-        )
-        image_prompts = build_image_prompts(crosswalk)
-    if len(image_prompts) != 30:
+    if len(image_prompts) != PROMPT_COUNT:
         raise RuntimeError(
-            f"Krea 2 Turbo prompt generation returned {len(image_prompts)} "
-            "prompts; expected 30"
+            f"Krea 2 Turbo prompt generation returned {len(image_prompts)} prompts; expected {PROMPT_COUNT}"
         )
     logger.info("Generated %d image prompts", len(image_prompts))
 
