@@ -137,7 +137,7 @@ See [templates/image_prompts.md](templates/image_prompts.md) for the shot list a
 ### Prerequisites
 
 - Python 3.11+
-- Node.js 22+ (Node 18 reached end-of-life in April 2025)
+- Node.js 22+ (24 or 26 LTS recommended; Node 20 reached end-of-life in October 2026)
 - AWS CLI configured with appropriate credentials
 - AWS CDK CLI (`npm install -g aws-cdk`)
 - Pandoc installed
