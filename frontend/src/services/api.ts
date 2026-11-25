@@ -30,6 +30,12 @@ export interface StatusResponse {
   current_step?: string;
   steps?: StepInfo[];
   error?: string;
+  qc?: {
+    status: 'PASS' | 'FAIL';
+    error_count: number;
+    warning_count: number;
+    errors: string[];
+  };
 }
 
 export interface StepInfo {
@@ -40,10 +46,11 @@ export interface StepInfo {
 export interface DownloadResponse {
   status: string;
   urls: {
-    appraisal: string;
-    rent_roll: string;
-    t12_files: string[];
-    complete_package: string;
+    appraisal?: string;
+    lender_narrative?: string;
+    rent_roll?: string;
+    t12_files?: string[];
+    complete_package?: string;
   };
 }
 

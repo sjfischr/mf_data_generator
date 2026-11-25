@@ -36,7 +36,7 @@ This project generates synthetic multifamily appraisal packages using AI:
 - `input_validator` - Validates user input from frontend
 - `crosswalk_generator` - Creates master data schema (CRITICAL)
 - `section_generators` (01-12) - Generate appraisal sections using Claude
-- `image_generator` - Generates property images via Replicate API
+- `image_generator` - Generates property images via fal.ai Krea 2 Turbo
 - `t12_generator` - Creates Excel files (T-12, rent rolls)
 - `qc_validator` - Validates data consistency
 - `assembler` - Assembles final DOCX + ZIP package
@@ -70,7 +70,7 @@ This project generates synthetic multifamily appraisal packages using AI:
 **Required GitHub Secrets**:
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
-- `REPLICATE_API_TOKEN`
+- `FAL_KEY`
 
 ### Frontend Deployment (Vercel)
 
@@ -191,7 +191,7 @@ mf_data_generator/
 │   ├── crosswalk_generator/       # Master data generator (CRITICAL)
 │   ├── section_generators/        # 12 appraisal sections
 │   │   ├── section_01/ ... section_12/
-│   ├── image_generator/           # Replicate API integration
+│   ├── image_generator/           # fal.ai Krea 2 Turbo integration
 │   ├── t12_generator/             # Excel file generation
 │   ├── qc_validator/              # Data validation
 │   ├── assembler/                 # Document assembly (Pandoc)
@@ -295,7 +295,7 @@ mf_data_generator/
 **Backend**:
 - `AWS_ACCESS_KEY_ID` - AWS IAM access key
 - `AWS_SECRET_ACCESS_KEY` - AWS IAM secret key
-- `REPLICATE_API_TOKEN` - Replicate API token injected into ImageGenerator Lambda
+- `FAL_KEY` - fal.ai API key injected into ImageGenerator Lambda
 
 **Frontend**:
 - `VITE_API_URL` - Full API Gateway URL (e.g., `https://abc123.execute-api.us-east-1.amazonaws.com/prod`)
@@ -308,7 +308,7 @@ mf_data_generator/
 These are configured in `lambda_stack.py` and automatically injected:
 - `BUCKET_NAME` - S3 bucket for storing generated files
 - `TOPIC_ARN` - SNS topic for notifications
-- `REPLICATE_API_TOKEN` - For image generation (set in CDK)
+- `FAL_KEY` - For Krea 2 Turbo image generation (set in CDK)
 
 ---
 

@@ -1,7 +1,7 @@
 # Image Generation Prompts
 
 This document describes how the image generator builds a **consistent** 30-image
-photo package for a property using the Krea 2 Large model on Replicate.
+photo package for a property using the Krea 2 Turbo model on fal.ai.
 
 Prompts are **not** hand-authored from this file — they are generated at runtime
 in [`lambdas/image_generator/handler.py`](../lambdas/image_generator/handler.py).
@@ -25,8 +25,8 @@ This document is the reference for the shot list and the prompt structure.
    call, each threaded through the shared concept above, using the exact
    structure below.
 
-3. **Rendering (Krea 2 Large)** — each assembled prompt is sent to
-   `krea/krea-2-large` at `creativity: "low"` to minimize drift and keep the
+3. **Rendering (Krea 2 Turbo)** — each assembled prompt is sent to
+   `fal-ai/krea-2/turbo` with deterministic seeds and prompt expansion disabled to keep the
    package internally consistent.
 
 ## Prompt structure
@@ -61,7 +61,7 @@ Negative prompt suggestions: [comma-separated — 4-6 things to avoid: common ge
 - Keep every section to visual, physically observable detail only.
 - Every section must be present, even if brief.
 
-> **Note on negative prompts:** Krea 2 Large has no separate `negative_prompt`
+> **Note on negative prompts:** Krea 2 Turbo has no separate `negative_prompt`
 > API field. The "Negative prompt suggestions" section is kept inline as part of
 > the single assembled prompt string.
 

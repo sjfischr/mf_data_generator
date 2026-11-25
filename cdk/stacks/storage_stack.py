@@ -27,6 +27,7 @@ class StorageStack(Stack):
             lifecycle_rules=[
                 s3.LifecycleRule(
                     expiration=Duration.days(30),
+                    noncurrent_version_expiration=Duration.days(7),
                 ),
             ],
             cors=[

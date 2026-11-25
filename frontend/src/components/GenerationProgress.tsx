@@ -76,7 +76,12 @@ export default function GenerationProgress({
       } else if (data.status === 'failed') {
         completedRef.current = true;
         if (intervalRef.current) clearInterval(intervalRef.current);
-        onError(data.error || 'The generation job failed. Please try again.');
+        const qcError = data.qc?.errors?.[0];
+        onError(
+          qcError ||
+            data.error ||
+            'The generation job failed. Please try again.',
+        );
       }
     } catch (err) {
       // Swallow transient network errors -- keep polling

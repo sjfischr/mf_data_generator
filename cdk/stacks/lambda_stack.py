@@ -1,6 +1,7 @@
 from aws_cdk import (
     Stack,
     Duration,
+    Size,
     BundlingOptions,
     aws_lambda as _lambda,
     aws_s3 as s3,
@@ -27,10 +28,14 @@ class LambdaStack(Stack):
         self.bucket = bucket
         self.topic = topic
 
-        replicate_api_token = os.environ.get("REPLICATE_API_TOKEN", "").strip()
-        if not replicate_api_token:
+        fal_key = (
+            os.environ.get("FAL_KEY")
+            or os.environ.get("FAL_AI_API_TOKEN")
+            or ""
+        ).strip()
+        if not fal_key:
             raise ValueError(
-                "REPLICATE_API_TOKEN environment variable is required for ImageGenerator deployment"
+                "FAL_KEY environment variable is required for ImageGenerator deployment"
             )
 
         sonnet_model_arn = os.environ.get("BEDROCK_SONNET_MODEL_ARN", "").strip()
@@ -111,7 +116,8 @@ class LambdaStack(Stack):
             handler_path="lambdas/image_generator",
             memory_size=1024,
             timeout_minutes=10,
-            extra_env={"REPLICATE_API_TOKEN": replicate_api_token},
+            extra_env={"FAL_KEY": fal_key},
+            bundle_requirements=True,
         )
 
         self.qc_validator = self._create_lambda(
@@ -119,13 +125,16 @@ class LambdaStack(Stack):
             handler_path="lambdas/qc_validator",
             memory_size=512,
             timeout_minutes=5,
+            bundle_requirements=True,
         )
 
         self.assembler = self._create_lambda(
             "Assembler",
             handler_path="lambdas/assembler",
-            memory_size=512,
+            memory_size=1024,
             timeout_minutes=15,
+            ephemeral_storage_gb=2048,
+            bundle_requirements=True,
         )
 
         self.t12_generator = self._create_lambda(
@@ -133,6 +142,15 @@ class LambdaStack(Stack):
             handler_path="lambdas/t12_generator",
             memory_size=512,
             timeout_minutes=5,
+            bundle_requirements=True,
+        )
+
+        self.lender_narrative_generator = self._create_lambda(
+            "LenderNarrativeGenerator",
+            handler_path="lambdas/lender_narrative_generator",
+            memory_size=1024,
+            timeout_minutes=10,
+            bundle_requirements=True,
         )
 
         # --- Section generator Lambdas (section_01 through section_12) ---
@@ -209,22 +227,44 @@ class LambdaStack(Stack):
         memory_size: int = 512,
         timeout_minutes: int = 5,
         extra_env: dict | None = None,
+        ephemeral_storage_gb: int | None = None,
+        bundle_requirements: bool = False,
     ) -> _lambda.Function:
         """Create a Lambda function with standard configuration."""
         environment = {**self.shared_env}
         if extra_env:
             environment.update(extra_env)
 
+        code = _lambda.Code.from_asset(handler_path)
+        if bundle_requirements:
+            code = _lambda.Code.from_asset(
+                handler_path,
+                bundling=BundlingOptions(
+                    image=_lambda.Runtime.PYTHON_3_11.bundling_image,
+                    command=[
+                        "bash",
+                        "-c",
+                        "pip install -r requirements.txt -t /asset-output "
+                        "&& cp -r /asset-input/. /asset-output/",
+                    ],
+                ),
+            )
+
         fn = _lambda.Function(
             self,
             construct_id,
             runtime=_lambda.Runtime.PYTHON_3_11,
             handler="handler.handler",
-            code=_lambda.Code.from_asset(handler_path),
+            code=code,
             memory_size=memory_size,
             timeout=Duration.minutes(timeout_minutes),
             environment=environment,
             layers=[self.shared_layer],
+            ephemeral_storage_size=(
+                Size.mebibytes(ephemeral_storage_gb)
+                if ephemeral_storage_gb
+                else None
+            ),
         )
 
         # Grant S3 read/write access

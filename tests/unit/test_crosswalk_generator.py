@@ -130,3 +130,71 @@ class TestCrosswalkGenerator:
 
         # Occupancy units add up
         assert data.validate_occupancy_units()
+
+    def test_parse_agent_json_from_markdown_fence(self):
+        from lambdas.crosswalk_generator.handler import _parse_agent_json
+
+        raw = '```json\n{"property_name":"Test"}\n```'
+        assert _parse_agent_json(raw) == {"property_name": "Test"}
+
+    def test_parse_agent_json_from_dict(self):
+        from lambdas.crosswalk_generator.handler import _parse_agent_json
+
+        payload = {"property_name": "Test"}
+        assert _parse_agent_json(payload) is payload
+
+    def test_invoke_model_json_extracts_embedded_object(self, mocker):
+        from lambdas.shared import bedrock_client
+
+        mocker.patch(
+            "lambdas.shared.bedrock_client.invoke_model",
+            return_value='Here is the result:\n```json\n{"status":"ok"}\n```\n',
+        )
+        assert bedrock_client.invoke_model_json("prompt") == {"status": "ok"}
+
+    def test_repair_and_finalize_messy_draft(self, finalized_crosswalk):
+        cw = finalized_crosswalk
+        assert cw.property_physical.total_units == 200
+        assert sum(u.count for u in cw.property_physical.unit_mix) == 200
+        assert cw.financial_data.effective_date == "2026-11-15"
+        sale = cw.market_data.comparable_sales[0]
+        assert sale.price_per_unit == round(sale.sale_price / sale.units)
+        assert cw.validate_cap_rate() and cw.validate_value_per_unit() and cw.validate_occupancy_units()
+        year_1 = cw.operating_history.year_1
+        assert year_1.gpr == 4_100_000 and year_1.vacancy == 205_000
+        assert cw.financial_data.historical_t12["Year 1"].net_operating_income == year_1.noi
+        assert (year_1.period_start, year_1.period_end) == ("2025-11-01", "2026-10-31")
+        assert cw.operating_history.year_3.period_start == "2023-11-01"
+        fin = cw.financing
+        assert fin.tier == "Tier 2" and fin.loan_purpose == "Acquisition"
+        assert fin.underwritten_dscr >= fin.tier_minimum_dscr
+        assert fin.ltv_underwriting_value <= fin.tier_maximum_ltv
+        su = fin.sources_uses
+        assert sum(l.amount for l in su.sources) == sum(l.amount for l in su.uses)
+        assert sum(p.net_worth for p in cw.sponsorship.key_principals) >= fin.loan_amount
+        assert cw.third_party_reports.appraisal.value == cw.valuation.final_value_conclusion.market_value
+        assert cw.third_party_reports.environmental_site_assessment.firm
+
+    def test_generate_crosswalk_uses_model_draft(self, mocker, llm_draft):
+        from lambdas.crosswalk_generator.handler import generate_crosswalk
+
+        mocker.patch("lambdas.shared.bedrock_client.invoke_model_json", return_value=llm_draft)
+        cw = generate_crosswalk(dict(sample_input_dict()), "job-1")
+        assert cw.job_id == "job-1"
+        assert cw.financing.loan_amount > 0
+
+    def test_handler_fails_after_two_bad_drafts(self, mocker):
+        from lambdas.crosswalk_generator import handler as cw_handler
+
+        mocker.patch("lambdas.shared.s3_utils.read_json", return_value=sample_input_dict())
+        invoke = mocker.patch("lambdas.shared.bedrock_client.invoke_model_json", side_effect=ValueError("bad json"))
+        with pytest.raises(cw_handler.CrosswalkGenerationError):
+            cw_handler.handler({"job_id": "job-1"}, None)
+        assert invoke.call_count == 2
+
+
+def sample_input_dict():
+    return {
+        "address": "1234 Main Street", "city": "Denver", "state": "CO",
+        "units": 200, "year_built": 2018, "property_type": "garden-style",
+    }

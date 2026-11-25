@@ -1,12 +1,14 @@
-"""Image Generator Lambda — generates property images via Replicate API."""
+"""Image Generator Lambda — generates property images via fal.ai Krea 2 Turbo."""
 
 import json
 import logging
 import os
 import textwrap
+import hashlib
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import replicate
+import fal_client
 import requests
 
 from lambdas.shared import bedrock_client, s3_utils
@@ -14,7 +16,7 @@ from lambdas.shared.models import CrosswalkData
 
 logger = logging.getLogger(__name__)
 
-REPLICATE_MODEL = "krea/krea-2-large"
+FAL_MODEL = "fal-ai/krea-2/turbo"
 MAX_WORKERS = 10
 
 # Model used for prompt generation. Sonnet is used instead of Haiku here because
@@ -23,7 +25,7 @@ MAX_WORKERS = 10
 PROMPT_MODEL = "sonnet"
 
 STRUCTURED_PROMPT_SYSTEM = textwrap.dedent("""\
-    You are a prompt generator for the Krea 2 Large image generation model. Given
+    You are a prompt generator for the Krea 2 Turbo image generation model. Given
     a shot description and a shared architectural concept for a property, output
     a structured prompt using the following exact section headers, in this exact
     order. Do not add commentary, disclaimers, or any text outside the structure
@@ -115,24 +117,31 @@ def _assemble_structured_prompt(item: dict) -> str:
     )
 
 
-def build_image_prompts(crosswalk: CrosswalkData) -> list[dict]:
-    """Generate 30 structured, mutually-consistent image prompts.
+SHOT_BATCHES = [
+    ("exterior", "6 exterior views (aerial, street frontage, entrance/signage area, building elevations) "
+                 "and 4 amenity views", 10),
+    ("interior", "10 unit interior views across the unit types (living, kitchen, bedroom, bath)", 10),
+    ("site", "2 more amenity views, 2 more unit interiors, and 6 site/surroundings views "
+             "(parking, landscaping, walkways, neighborhood context)", 10),
+]
+PROMPT_COUNT = sum(count for _, _, count in SHOT_BATCHES)
 
-    First establishes a shared architectural concept for the property, then
-    generates all 30 structured prompts in a single call so the model can keep
-    them consistent with each other and with the shared concept.
-    """
+
+def _prompt_items(result) -> list[dict]:
+    if isinstance(result, dict):
+        result = result.get("prompts") or next((v for v in result.values() if isinstance(v, list)), [])
+    return [item for item in result if isinstance(item, dict)] if isinstance(result, list) else []
+
+
+def _generate_batch(crosswalk: CrosswalkData, concept: dict, batch: tuple[str, str, int]) -> list[dict]:
+    """Generate one batch of structured prompts that all reuse the shared concept."""
+    name, shots, count = batch
     prop = crosswalk.property_identification
     phys = crosswalk.property_physical
-
     unit_sizes = {u.unit_type: u.avg_size_sf for u in phys.unit_mix}
-
-    concept = generate_architectural_concept(crosswalk)
-    logger.info("Architectural concept: %s", json.dumps(concept))
-
-    prompt = f"""Using the shared architectural concept below, generate exactly 30
+    prompt = f"""Using the shared architectural concept below, generate exactly {count}
 structured image prompts for a commercial real estate appraisal photo package:
-6 exterior views, 6 amenity views, 12 unit interiors, 6 site/surroundings.
+{shots}. Prefix every filename with "{name}_".
 
 Shared architectural concept (reuse these details consistently in every prompt):
 {json.dumps(concept, indent=2)}
@@ -149,55 +158,102 @@ Property details:
 - Amenities: {', '.join(phys.amenities)}
 - Unit sizes: {json.dumps(unit_sizes)}
 
-Return a JSON array of exactly 30 objects. Each object must have:
-- "filename": descriptive filename like "aerial_view.jpg"
+Return a JSON array of exactly {count} objects. Each object must have:
+- "filename": descriptive filename like "{name}_aerial_view.jpg"
 - "description": short description for the image manifest
-- "subject": the Subject section content
-- "architecture_details": the Architecture details section content
-- "landscaping": the Landscaping section content
-- "lighting_atmosphere": the Lighting/atmosphere section content
-- "camera": the Camera section content
-- "style_tags": the Style tags section content
-- "negative_prompt_suggestions": the Negative prompt suggestions section content
+- "subject", "architecture_details", "landscaping", "lighting_atmosphere",
+  "camera", "style_tags", "negative_prompt_suggestions": the structured sections
 """
+    items: list[dict] = []
+    for attempt in range(2):
+        result = bedrock_client.invoke_model_json(
+            prompt=prompt,
+            model=PROMPT_MODEL,
+            system_prompt=STRUCTURED_PROMPT_SYSTEM,
+            max_tokens=12000,
+        )
+        items = [i for i in _prompt_items(result) if i.get("filename") and i.get("subject")]
+        if len(items) >= count:
+            return items[:count]
+        logger.warning("Batch %s returned %d prompts (attempt %d); retrying", name, len(items), attempt + 1)
+    raise RuntimeError(f"Krea 2 Turbo prompt batch '{name}' returned {len(items)} prompts; expected {count}")
 
-    result = bedrock_client.invoke_model_json(
-        prompt=prompt,
-        model=PROMPT_MODEL,
-        system_prompt=STRUCTURED_PROMPT_SYSTEM,
-        max_tokens=8192,
-    )
 
-    if isinstance(result, dict) and "prompts" in result:
-        items = result["prompts"]
-    elif isinstance(result, list):
-        items = result
-    else:
-        items = result
+def build_image_prompts(crosswalk: CrosswalkData) -> list[dict]:
+    """Generate 30 structured, mutually consistent image prompts.
 
-    for item in items:
+    One architectural concept is established first and threaded through three
+    concurrent prompt batches, keeping every shot visually consistent while
+    keeping each model call short.
+    """
+    concept = generate_architectural_concept(crosswalk)
+    logger.info("Architectural concept: %s", json.dumps(concept))
+
+    with ThreadPoolExecutor(max_workers=len(SHOT_BATCHES)) as pool:
+        batches = list(pool.map(lambda b: _generate_batch(crosswalk, concept, b), SHOT_BATCHES))
+
+    items: list[dict] = []
+    seen: set[str] = set()
+    for item in (i for batch in batches for i in batch):
+        filename = str(item["filename"]).strip().replace(" ", "_")
+        if not filename.lower().endswith((".jpg", ".jpeg")):
+            filename += ".jpg"
+        while filename in seen:
+            filename = filename.replace(".jpg", "_2.jpg")
+        seen.add(filename)
+        item["filename"] = filename
+        for key in ("architecture_details", "landscaping", "lighting_atmosphere", "camera",
+                    "style_tags", "negative_prompt_suggestions"):
+            item.setdefault(key, "")
         item["prompt"] = _assemble_structured_prompt(item)
-
+        items.append(item)
     return items
 
 
 def generate_single_image(prompt_data: dict, job_id: str) -> dict:
-    """Generate a single image via Replicate and upload to S3."""
+    """Generate a single image via fal.ai and upload to S3."""
     filename = prompt_data["filename"]
     image_prompt = prompt_data["prompt"]
 
-    try:
-        output = replicate.run(
-            REPLICATE_MODEL,
-            input={
+    seed = int.from_bytes(
+        hashlib.sha256(f"{job_id}:{filename}".encode("utf-8")).digest()[:8],
+        "big",
+    ) % (2**31)
+
+    def render(attempt_seed: int):
+        return fal_client.run(
+            FAL_MODEL,
+            arguments={
                 "prompt": image_prompt,
-                "creativity": "low",
+                "seed": attempt_seed,
+                "image_size": "landscape_4_3",
+                "num_images": 1,
+                "acceleration": "none",
+                "enable_prompt_expansion": False,
+                "enable_safety_checker": True,
+                "output_format": "jpeg",
             },
         )
 
-        # Replicate returns a URL or list of URLs
-        image_url = output[0] if isinstance(output, list) else output
+    try:
+        output = render(seed)
+        nsfw = (output or {}).get("has_nsfw_concepts", [])
+        if nsfw and nsfw[0]:
+            output = render(seed + 1)
+            nsfw = (output or {}).get("has_nsfw_concepts", [])
+            if nsfw and nsfw[0]:
+                return {
+                    "filename": filename,
+                    "description": prompt_data.get("description", ""),
+                    "status": "failed",
+                    "reason": "safety_filter",
+                    "error": "fal.ai safety filter flagged the render twice",
+                }
 
+        images = (output or {}).get("images", [])
+        if not images:
+            raise RuntimeError("fal.ai returned no images")
+        image_url = images[0]["url"]
         response = requests.get(image_url, timeout=60)
         response.raise_for_status()
 
@@ -207,20 +263,20 @@ def generate_single_image(prompt_data: dict, job_id: str) -> dict:
             response.content,
             "image/jpeg",
         )
-
         return {
             "filename": filename,
             "description": prompt_data.get("description", ""),
             "s3_key": s3_key,
             "status": "success",
         }
-    except Exception as e:
-        logger.error("Failed to generate image %s: %s", filename, e)
+    except Exception as exc:
+        logger.error("Failed to generate image %s: %s", filename, exc)
         return {
             "filename": filename,
             "description": prompt_data.get("description", ""),
             "status": "failed",
-            "error": str(e),
+            "reason": "render_error",
+            "error": str(exc),
         }
 
 
@@ -228,15 +284,20 @@ def handler(event, context):
     job_id = event["job_id"]
     logger.info("Generating images for job %s", job_id)
 
-    if not os.environ.get("REPLICATE_API_TOKEN"):
-        raise RuntimeError("REPLICATE_API_TOKEN is not configured")
+    fal_key = os.environ.get("FAL_KEY") or os.environ.get("FAL_AI_API_TOKEN")
+    if not fal_key:
+        raise RuntimeError("FAL_KEY or FAL_AI_API_TOKEN is not configured")
 
     # Load crosswalk data
     data = s3_utils.read_json(job_id, "crosswalk-data.json")
     crosswalk = CrosswalkData.model_validate(data)
 
-    # Generate customized prompts
+    # Generate structured prompts (each batch validates and retries its own count)
     image_prompts = build_image_prompts(crosswalk)
+    if len(image_prompts) != PROMPT_COUNT:
+        raise RuntimeError(
+            f"Krea 2 Turbo prompt generation returned {len(image_prompts)} prompts; expected {PROMPT_COUNT}"
+        )
     logger.info("Generated %d image prompts", len(image_prompts))
 
     # Generate images in parallel

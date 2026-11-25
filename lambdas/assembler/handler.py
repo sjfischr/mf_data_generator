@@ -14,6 +14,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from lambdas.shared import s3_utils
 from lambdas.shared.models import CrosswalkData
+from lambdas.shared.docx_renderer import markdown_to_docx as shared_markdown_to_docx
 
 logger = logging.getLogger(__name__)
 
@@ -490,6 +491,32 @@ def create_zip_package(job_id: str, docx_bytes: bytes) -> bytes:
             except Exception as e:
                 logger.warning("Could not add %s to ZIP: %s", candidate_keys, e)
 
+        extra_files = [
+            ("outputs/lender_narrative.docx", "lender_narrative.docx"),
+            ("qc_report.json", "qc_report.json"),
+        ]
+        for s3_filename, zip_filename in extra_files:
+            try:
+                candidate_key = s3_utils.job_key(job_id, s3_filename)
+                obj = s3.get_object(Bucket=s3_utils.BUCKET, Key=candidate_key)
+                zf.writestr(zip_filename, obj["Body"].read())
+            except Exception as exc:
+                logger.warning("Could not add %s to ZIP: %s", s3_filename, exc)
+
+        try:
+            manifest = s3_utils.read_json(job_id, "images/manifest.json")
+            for entry in manifest:
+                if entry.get("status") != "success":
+                    continue
+                image_key = entry.get("s3_key")
+                filename = entry.get("filename")
+                if not image_key or not filename:
+                    continue
+                obj = s3.get_object(Bucket=s3_utils.BUCKET, Key=image_key)
+                zf.writestr(f"photos/{filename}", obj["Body"].read())
+        except Exception as exc:
+            logger.warning("Could not add images to ZIP: %s", exc)
+
     return buf.getvalue()
 
 
@@ -503,8 +530,33 @@ def handler(event, context):
     # Insert images
     combined_markdown = insert_images(combined_markdown, job_id)
 
-    # Convert to DOCX
-    docx_bytes = markdown_to_docx(combined_markdown, job_id)
+    # Convert to DOCX with the shared renderer, embedding the generated photos
+    property_name, location_text = get_cover_metadata(job_id)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_map: dict[str, str] = {}
+        cover_image_path = None
+        try:
+            manifest = s3_utils.read_json(job_id, "images/manifest.json")
+            s3 = s3_utils.get_s3_client()
+            for entry in manifest:
+                if entry.get("status") == "success" and entry.get("s3_key"):
+                    local_path = os.path.join(tmpdir, entry["filename"])
+                    s3.download_file(s3_utils.BUCKET, entry["s3_key"], local_path)
+                    image_map[entry["filename"]] = local_path
+            cover_name = select_cover_image_filename(manifest)
+            cover_image_path = image_map.get(cover_name) if cover_name else None
+        except Exception as exc:
+            logger.warning("Could not download images for DOCX: %s", exc)
+
+        docx_bytes = shared_markdown_to_docx(
+            combined_markdown,
+            property_name=property_name,
+            lender_name=LENDER_NAME,
+            title=REPORT_TITLE,
+            location_text=location_text,
+            cover_image_path=cover_image_path,
+            image_map=image_map,
+        )
 
     # Upload DOCX
     s3_utils.write_bytes(
@@ -542,13 +594,11 @@ def handler(event, context):
 
     urls = {
         "appraisal": s3_utils.generate_presigned_url(job_id, "outputs/appraisal_report.docx"),
+        "lender_narrative": s3_utils.generate_presigned_url(job_id, "outputs/lender_narrative.docx"),
         "rent_roll": s3_utils.generate_presigned_url(job_id, "outputs/rent_roll.xlsx"),
         "t12_files": t12_urls,
         "complete_package": s3_utils.generate_presigned_url(job_id, "outputs/loan_package.zip"),
     }
-
-    # Save URLs to S3 for the download endpoint
-    s3_utils.write_json(job_id, "outputs/download_urls.json", urls)
 
     logger.info("Assembly complete for job %s", job_id)
 

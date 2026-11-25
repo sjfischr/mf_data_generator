@@ -7,6 +7,8 @@ import logging
 import os
 
 import boto3
+from botocore.config import Config
+from lambdas.shared.errors import TransientError, wrap_transient
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +26,12 @@ _client = None
 def get_bedrock_client():
     global _client
     if _client is None:
-        _client = boto3.client("bedrock-runtime", region_name=REGION)
+        # Long generations (structured prompts, memo prose) exceed botocore's 60s default.
+        _client = boto3.client(
+            "bedrock-runtime",
+            region_name=REGION,
+            config=Config(read_timeout=900, connect_timeout=10, retries={"max_attempts": 4, "mode": "adaptive"}),
+        )
     return _client
 
 
@@ -63,12 +70,18 @@ def invoke_model(
 
     logger.info("Invoking model %s", model_id)
 
-    response = client.invoke_model(
-        modelId=model_id,
-        contentType="application/json",
-        accept="application/json",
-        body=json.dumps(body),
-    )
+    try:
+        response = client.invoke_model(
+            modelId=model_id,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps(body),
+        )
+    except Exception as exc:
+        wrapped = wrap_transient(exc)
+        if isinstance(wrapped, TransientError):
+            raise wrapped from exc
+        raise
 
     result = json.loads(response["body"].read())
     return result["content"][0]["text"]
@@ -108,5 +121,20 @@ def invoke_model_json(
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         text = "\n".join(lines)
+
+    text = text.strip()
+    if not text:
+        raise ValueError("Bedrock returned an empty JSON response")
+
+    # Models sometimes add a short preamble or return the JSON as a fenced block.
+    # Extract the first complete JSON object/array embedded in the response.
+    starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
+    if starts:
+        start = min(starts)
+        opener = text[start]
+        closer = "}" if opener == "{" else "]"
+        end = text.rfind(closer)
+        if end >= start:
+            text = text[start:end + 1]
 
     return json.loads(text)

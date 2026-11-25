@@ -114,12 +114,20 @@ class TestSectionGeneratorBase:
         assert crosswalk.property_identification.property_name == "Test Apartments"
         assert crosswalk.property_physical.total_units == 50
 
+    @patch("lambdas.shared.section_generator.Agent")
+    @patch("lambdas.shared.section_generator.BedrockModel")
     @patch("lambdas.shared.s3_utils.write_text")
-    @patch("lambdas.shared.bedrock_client.invoke_model")
     @patch("lambdas.shared.s3_utils.read_json")
-    def test_execute_full_pipeline(self, mock_read, mock_bedrock, mock_write, sample_crosswalk_dict):
+    def test_execute_full_pipeline(
+        self,
+        mock_read,
+        mock_write,
+        mock_bedrock_model,
+        mock_agent,
+        sample_crosswalk_dict,
+    ):
         mock_read.return_value = sample_crosswalk_dict
-        mock_bedrock.return_value = "# Section 1\n\nGenerated content here."
+        mock_agent.return_value.return_value = "# Section 1\n\nGenerated content here."
         mock_write.return_value = "jobs/test-job-123/sections/test_section.md"
 
         from lambdas.shared.section_generator import SectionGenerator
@@ -135,5 +143,5 @@ class TestSectionGeneratorBase:
 
         assert result["status"] == "success"
         assert result["section"] == "test_section"
-        mock_bedrock.assert_called_once()
+        mock_agent.assert_called_once()
         mock_write.assert_called_once()
