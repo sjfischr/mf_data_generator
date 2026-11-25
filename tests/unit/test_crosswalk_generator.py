@@ -136,3 +136,9 @@ class TestCrosswalkGenerator:
 
         raw = '```json\n{"property_name":"Test"}\n```'
         assert _parse_agent_json(raw) == {"property_name": "Test"}
+
+    def test_parse_agent_json_from_dict(self):
+        from lambdas.crosswalk_generator.handler import _parse_agent_json
+
+        payload = {"property_name": "Test"}
+        assert _parse_agent_json(payload) is payload

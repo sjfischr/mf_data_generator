@@ -19,7 +19,7 @@ from strands.models.bedrock import BedrockModel
 
 from lambdas.shared.models import CrosswalkData, CrosswalkDraft
 from lambdas.shared.underwriting import finalize_crosswalk
-from lambdas.shared import s3_utils
+from lambdas.shared import bedrock_client, s3_utils
 from lambdas.shared.agent_tools import (
     compute_financial_metrics,
     compute_valuation_metrics,
@@ -257,6 +257,8 @@ def _create_crosswalk_agent() -> Agent:
 
 def _parse_agent_json(result) -> dict:
     """Extract a JSON object from a Strands 1.x AgentResult."""
+    if isinstance(result, dict):
+        return result
     if hasattr(result, "structured_output"):
         return result.structured_output.model_dump()
 
@@ -310,15 +312,17 @@ def handler(event, context):
     # 2. Generate crosswalk data via Strands agent
     # ------------------------------------------------------------------
     prompt = _build_prompt(user_input, job_id)
-    agent = _create_crosswalk_agent()
 
     try:
-        # Strands structured_output_model handles:
-        #   - Pydantic schema → tool spec conversion
-        #   - JSON extraction from agent response
-        #   - Pydantic validation with auto-retry on failure
-        result = agent(prompt)
-        draft_data = _parse_agent_json(result)
+        # Bedrock JSON mode avoids AgentResult API drift in Strands 1.x.
+        # The deterministic underwriting engine below performs all derived math.
+        draft_data = bedrock_client.invoke_model_json(
+            prompt=prompt,
+            model="haiku",
+            system_prompt=SYSTEM_PROMPT,
+            max_tokens=16000,
+        )
+        draft_data = _parse_agent_json(draft_data)
         draft = CrosswalkDraft.model_validate(draft_data)
         draft.job_id = job_id
         crosswalk = finalize_crosswalk(draft)
@@ -336,7 +340,7 @@ def handler(event, context):
         logger.info("Crosswalk generated and validated successfully")
 
     except Exception as exc:
-        logger.error("Crosswalk generation failed: %s", exc)
+        logger.exception("Crosswalk generation failed: %s", exc)
         raise CrosswalkGenerationError(
             f"Crosswalk generation failed: {exc}"
         ) from exc
